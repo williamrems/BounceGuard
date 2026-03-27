@@ -1,7 +1,7 @@
 """
 app.py
 BounceGuard by ContractorFlow
-Standalone Email Deliverability & DNS MX Validator (Dual-Mode)
+Standalone Email Deliverability & DNS MX Validator (Simplified Customer UI)
 """
 import streamlit as st
 import pandas as pd
@@ -23,56 +23,41 @@ with col_logo:
         st.markdown("<h1>🛡️</h1>", unsafe_allow_html=True)
 with col_title:
     st.title("BounceGuard")
-    st.caption("Powered by ContractorFlow Data Architecture")
+    st.caption("Protect your sender reputation. Powered by ContractorFlow.")
 
 # --- CONSTANTS & TRAPS ---
 FAKE_LOCAL_PARTS = {'test', 'something', 'anything', 'fake', 'email', 'noemail', 'donotemail', 'spam', 'customer', 'na', 'none', 'no'}
 GENERIC_EMAIL_PREFIXES = {'info', 'admin', 'sales', 'support', 'contact', 'hello', 'office'}
 FAKE_EMAILS_FULL = {'na@na.com', 'none@none.com', 'na@gmail.com', 'none@gmail.com', 'test@test.com', 'email@email.com', 'no@email.com'}
+SUSPECT_DOMAIN_PATTERN = re.compile(r'^(fake|demo|test|mock|example|sample)|(mailinator|yopmail|tempmail|10minute|guerrillamail|sharklasers|throwawaymail)\.', re.IGNORECASE)
 
-# SURGICAL DOMAIN TRAP: Catches example.net, testdomain.com, and known burner email providers
-# without accidentally blocking valid domains like "smartestate.com"
-SUSPECT_DOMAIN_PATTERN = re.compile(
-    r'^(fake|demo|test|mock|example|sample)|'
-    r'(mailinator|yopmail|tempmail|10minute|guerrillamail|sharklasers|throwawaymail)\.', 
-    re.IGNORECASE
-)
-
-# --- REGEX ENGINE ---
+# --- SIMPLIFIED REGEX ENGINE ---
 def format_and_trap_email(email):
-    """Phase 1: Local Regex & Syntax Validation"""
+    """Phase 1: Local Traps mapped to simple outputs"""
     if pd.isna(email) or str(email).strip() == '' or str(email).strip().lower() == 'nan': 
-        return "", "EMPTY"
+        return "", "⚪ Empty"
         
     clean_str = str(email).strip().lower()
     
-    if '..' in clean_str: return clean_str, "INVALID_FORMAT: (DOUBLE PERIOD)"
-    if clean_str in FAKE_EMAILS_FULL: return clean_str, "INVALID_FORMAT: (KNOWN FAKE)"
-    if not re.match(r'^[\w\.-]+@[\w\.-]+\.\w+$', clean_str): return clean_str, "INVALID_FORMAT: (SYNTAX)"
+    if '..' in clean_str or clean_str in FAKE_EMAILS_FULL or not re.match(r'^[\w\.-]+@[\w\.-]+\.\w+$', clean_str): 
+        return clean_str, "🚨 Bounce"
     
     try:
         local_part = clean_str.split('@')[0]
         domain_part = clean_str.split('@')[1]
         
-        if re.search(r'\d+bad\d+', local_part) or local_part == 'bad':
-            return clean_str, "INVALID_FORMAT: (SUSPECT SPAM)"
-            
-        if local_part in FAKE_LOCAL_PARTS:
-            return clean_str, "INVALID_FORMAT: (KNOWN FAKE)"
-            
-        # NEW: Aggressive Burner & Demo Domain Trap
-        if SUSPECT_DOMAIN_PATTERN.search(domain_part):
-            return clean_str, "INVALID_FORMAT: (SUSPECT DOMAIN)"
+        if re.search(r'\d+bad\d+', local_part) or local_part == 'bad' or local_part in FAKE_LOCAL_PARTS or SUSPECT_DOMAIN_PATTERN.search(domain_part):
+            return clean_str, "🚨 Bounce"
             
         if local_part in GENERIC_EMAIL_PREFIXES:
-            return clean_str, "WARNING: (GENERIC PREFIX)"
+            return clean_str, "⚠️ Caution (Role-Based)"
             
     except Exception:
         pass
         
-    return clean_str, "PENDING_DNS"
+    return clean_str, "PENDING"
 
-# --- ASYNC DNS-OVER-HTTPS ENGINE ---
+# --- SIMPLIFIED ASYNC DNS ENGINE ---
 class EmailDomainValidator:
     def __init__(self, max_concurrent: int = 150):
         self.semaphore = asyncio.Semaphore(max_concurrent)
@@ -85,15 +70,13 @@ class EmailDomainValidator:
                     if response.status == 200:
                         data = await response.json()
                         if data.get('Status') == 0 and 'Answer' in data:
-                            return "VALID_DOMAIN"
-                        elif data.get('Status') == 3:
-                            return "DEAD_DOMAIN"
+                            return "✅ Safe"
                         else:
-                            return "NO_MX_RECORDS"
+                            return "🚨 Bounce"
                     else:
-                        return "DNS_TIMEOUT"
+                        return "🚨 Bounce"
             except Exception:
-                return "DNS_TIMEOUT"
+                return "🚨 Bounce"
 
     async def check_single(self, domain: str) -> str:
         async with aiohttp.ClientSession() as session:
@@ -101,17 +84,17 @@ class EmailDomainValidator:
 
     async def process_batch(self, df: pd.DataFrame, email_col: str) -> pd.DataFrame:
         df_result = df.copy()
-        if 'Email_Domain_Status' not in df_result.columns:
-            df_result['Email_Domain_Status'] = ''
+        if 'BounceGuard_Status' not in df_result.columns:
+            df_result['BounceGuard_Status'] = ''
 
         tasks = []
         indices = []
 
         async with aiohttp.ClientSession() as session:
             for idx, row in df_result.iterrows():
-                current_status = row.get('Email_Domain_Status', '')
+                current_status = row.get('BounceGuard_Status', '')
                 
-                if current_status in ["PENDING_DNS", "WARNING: (GENERIC PREFIX)"]:
+                if current_status in ["PENDING", "⚠️ Caution (Role-Based)"]:
                     email = str(row.get(email_col, ''))
                     domain = email.split('@')[-1]
                     
@@ -121,11 +104,11 @@ class EmailDomainValidator:
             if tasks:
                 results = await asyncio.gather(*tasks)
                 for i, res in enumerate(results):
-                    original_status = df_result.at[indices[i], 'Email_Domain_Status']
-                    if original_status == "WARNING: (GENERIC PREFIX)" and res == "VALID_DOMAIN":
-                        df_result.at[indices[i], 'Email_Domain_Status'] = "VALID_DOMAIN (GENERIC PREFIX)"
+                    original_status = df_result.at[indices[i], 'BounceGuard_Status']
+                    if original_status == "⚠️ Caution (Role-Based)" and res == "✅ Safe":
+                        df_result.at[indices[i], 'BounceGuard_Status'] = "⚠️ Caution (Role-Based)"
                     else:
-                        df_result.at[indices[i], 'Email_Domain_Status'] = res
+                        df_result.at[indices[i], 'BounceGuard_Status'] = res
 
         return df_result
 
@@ -142,18 +125,16 @@ def generate_excel(df):
     if not df.empty:
         worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
         
-        status_idx = df.columns.get_loc('Email_Domain_Status')
+        status_idx = df.columns.get_loc('BounceGuard_Status')
         red_fmt = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
         green_fmt = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100'})
         yellow_fmt = workbook.add_format({'bg_color': '#FFF2CC', 'font_color': '#9C6500'})
         gray_fmt = workbook.add_format({'font_color': '#7F7F7F'})
         
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {'type': 'text', 'criteria': 'containing', 'value': 'VALID_DOMAIN', 'format': green_fmt})
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {'type': 'text', 'criteria': 'containing', 'value': 'DEAD', 'format': red_fmt})
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {'type': 'text', 'criteria': 'containing', 'value': 'INVALID', 'format': red_fmt})
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {'type': 'text', 'criteria': 'containing', 'value': 'NO_MX', 'format': red_fmt})
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {'type': 'text', 'criteria': 'containing', 'value': 'GENERIC', 'format': yellow_fmt})
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {'type': 'text', 'criteria': 'containing', 'value': 'EMPTY', 'format': gray_fmt})
+        worksheet.conditional_format(1, status_idx, len(df), status_idx, {'type': 'text', 'criteria': 'containing', 'value': 'Safe', 'format': green_fmt})
+        worksheet.conditional_format(1, status_idx, len(df), status_idx, {'type': 'text', 'criteria': 'containing', 'value': 'Bounce', 'format': red_fmt})
+        worksheet.conditional_format(1, status_idx, len(df), status_idx, {'type': 'text', 'criteria': 'containing', 'value': 'Caution', 'format': yellow_fmt})
+        worksheet.conditional_format(1, status_idx, len(df), status_idx, {'type': 'text', 'criteria': 'containing', 'value': 'Empty', 'format': gray_fmt})
 
     for idx, col in enumerate(df.columns):
         max_len = max(df[col].astype(str).map(len).max(), len(col)) + 2
@@ -164,14 +145,14 @@ def generate_excel(df):
 
 
 # --- UI ROUTING ---
-tab_single, tab_bulk = st.tabs(["🎯 Quick Check Terminal", "📁 Bulk List Engine"])
+tab_single, tab_bulk = st.tabs(["🎯 Quick Check", "📁 Bulk List Engine"])
 
 # ==========================================
 # TAB 1: SINGLE CHECK TERMINAL
 # ==========================================
 with tab_single:
     st.markdown("### Real-Time Deliverability Check")
-    st.markdown("Instantly ping a single email address against global DNS registries.")
+    st.markdown("Instantly verify a single email address before sending.")
     
     single_email = st.text_input("Enter Email Address:", placeholder="name@company.com")
     
@@ -179,33 +160,33 @@ with tab_single:
         if not single_email:
             st.warning("Please enter an email address.")
         else:
-            with st.spinner("Analyzing syntax and pinging MX records..."):
+            with st.spinner("Analyzing..."):
                 clean_em, status = format_and_trap_email(single_email)
                 
-                if status == "PENDING_DNS" or status == "WARNING: (GENERIC PREFIX)":
+                if status in ["PENDING", "⚠️ Caution (Role-Based)"]:
                     domain = clean_em.split('@')[-1]
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
                     validator = EmailDomainValidator()
                     dns_result = loop.run_until_complete(validator.check_single(domain))
                     
-                    if status == "WARNING: (GENERIC PREFIX)" and dns_result == "VALID_DOMAIN":
-                        final_status = "VALID_DOMAIN (GENERIC PREFIX)"
+                    if status == "⚠️ Caution (Role-Based)" and dns_result == "✅ Safe":
+                        final_status = "⚠️ Caution (Role-Based)"
                     else:
                         final_status = dns_result
                 else:
                     final_status = status
                     
                 st.markdown("---")
-                if "VALID_DOMAIN" in final_status:
+                if "Safe" in final_status:
                     st.success(f"**{clean_em}**")
-                    st.success(f"✅ **{final_status}**: The domain is active and configured to receive email.")
-                elif "WARNING" in final_status:
+                    st.success(f"✅ **Safe to Send**: This mailbox is active.")
+                elif "Caution" in final_status:
                     st.warning(f"**{clean_em}**")
-                    st.warning(f"⚠️ **{final_status}**: The domain is active, but this is a role-based address (info@, admin@).")
+                    st.warning(f"⚠️ **Caution**: The domain is valid, but this is a generic inbox (info@, admin@). Engagement may be low.")
                 else:
                     st.error(f"**{clean_em}**")
-                    st.error(f"🚨 **{final_status}**: This email will bounce or is an invalid entry. Do not send.")
+                    st.error(f"🚨 **Will Bounce**: Do not send to this address. It will harm your sender reputation.")
 
 # ==========================================
 # TAB 2: BULK LIST ENGINE
@@ -220,8 +201,6 @@ with tab_bulk:
         else:
             df = pd.read_excel(uploaded_file)
             
-        st.success(f"File loaded successfully! ({len(df):,} rows)")
-        
         columns = list(df.columns)
         guess_idx = 0
         for i, col in enumerate(columns):
@@ -230,23 +209,18 @@ with tab_bulk:
                 break
                 
         st.markdown("---")
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            target_col = st.selectbox("🎯 Target Email Column:", options=columns, index=guess_idx)
-        with col2:
-            st.markdown("<br>", unsafe_allow_html=True)
-            heal_data = st.checkbox("Self-Heal Dead Emails", value=False, help="Automatically moves bad emails to a 'Legacy_Invalid_Email' column and clears the primary field to protect your CRM.")
+        target_col = st.selectbox("🎯 Target Email Column:", options=columns, index=guess_idx)
+        heal_data = st.checkbox("Self-Heal Dead Emails", value=False, help="Automatically clears bad emails to protect your CRM.")
 
         if st.button("🚀 Run Batch Validation", type="primary", use_container_width=True):
-            st.info("💡 Tip: You can cancel this process at any time by clicking 'Stop' in the top right.")
             
-            with st.spinner("Applying regex formatting and spam traps..."):
-                df['Email_Domain_Status'] = ''
+            with st.spinner("Analyzing emails..."):
+                df['BounceGuard_Status'] = ''
                 for idx, row in df.iterrows():
                     raw_email = row[target_col]
                     clean_em, status = format_and_trap_email(raw_email)
                     df.at[idx, target_col] = clean_em
-                    df.at[idx, 'Email_Domain_Status'] = status
+                    df.at[idx, 'BounceGuard_Status'] = status
                     
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -254,7 +228,7 @@ with tab_bulk:
             chunk_size = 1000
             num_chunks = math.ceil(len(df) / chunk_size)
             
-            progress_bar = st.progress(0, text=f"Pinging DNS registries... (0/{len(df):,})")
+            progress_bar = st.progress(0, text=f"Verifying domains... (0/{len(df):,})")
             validator = EmailDomainValidator(max_concurrent=150)
             
             processed_chunks = []
@@ -264,23 +238,36 @@ with tab_bulk:
                 processed_chunks.append(chunk_res)
                 
                 records_done = min((i+1)*chunk_size, len(df))
-                progress_bar.progress((i + 1) / num_chunks, text=f"Pinging DNS registries... ({records_done:,}/{len(df):,})")
+                progress_bar.progress((i + 1) / num_chunks, text=f"Verifying domains... ({records_done:,}/{len(df):,})")
 
             df_final = pd.concat(processed_chunks, ignore_index=True)
             progress_bar.empty()
             
+            # --- ROI DASHBOARD ---
+            total_emails = len(df_final[df_final[target_col] != ""])
+            bounces = df_final['BounceGuard_Status'].str.contains('Bounce').sum()
+            safe = df_final['BounceGuard_Status'].str.contains('Safe').sum()
+            
+            st.markdown("### 🏆 Protection Report")
+            col_a, col_b, col_c = st.columns(3)
+            col_a.metric("Emails Processed", f"{total_emails:,}")
+            col_b.metric("✅ Safe to Send", f"{safe:,}")
+            col_c.metric("🚨 Hard Bounces Prevented", f"{bounces:,}", delta="Reputation Saved", delta_color="normal")
+            st.markdown("---")
+
+            # --- SELF HEALING ---
             if heal_data:
-                bad_statuses = ['DEAD_DOMAIN', 'NO_MX_RECORDS', 'INVALID_FORMAT']
-                mask_dead = df_final['Email_Domain_Status'].str.contains('|'.join(bad_statuses))
-                
+                mask_dead = df_final['BounceGuard_Status'].str.contains('Bounce')
                 df_final['Legacy_Invalid_Email'] = ''
                 df_final.loc[mask_dead, 'Legacy_Invalid_Email'] = df_final.loc[mask_dead, target_col]
                 df_final.loc[mask_dead, target_col] = ''
-                st.success(f"✅ Validation Complete! Automatically quarantined {mask_dead.sum():,} bad emails.")
-            else:
-                st.success("✅ Validation Complete!")
-                
-            st.dataframe(df_final.head(100))
+
+            # --- SCROLL FIX: Pin Email and Status to the front ---
+            display_cols = df_final.columns.tolist()
+            display_cols.insert(0, display_cols.pop(display_cols.index('BounceGuard_Status')))
+            display_cols.insert(0, display_cols.pop(display_cols.index(target_col)))
+            
+            st.dataframe(df_final[display_cols].head(100))
             
             st.download_button(
                 label="📥 Download Validated List (.xlsx)",
