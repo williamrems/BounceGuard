@@ -69,8 +69,10 @@ class EmailDomainValidator:
         if 'Email_Domain_Status' not in df_result.columns:
             df_result['Email_Domain_Status'] = ''
 
-        # Force Cloudflare/Google DNS to bypass server-specific routing issues
-        resolver = aiodns.DNSResolver(nameservers=['1.1.1.1', '8.8.8.8'])
+        # THE FIX: Remove hardcoded nameservers so Railway uses its native internal resolver.
+        # This bypasses the Port 53 outbound UDP firewall block.
+        resolver = aiodns.DNSResolver()
+        
         tasks = []
         indices = []
 
