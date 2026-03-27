@@ -1,12 +1,12 @@
 """
 app.py
 Standalone Email Deliverability & DNS MX Validator
-Designed for deployment on PaaS providers like Railway.app
+Uses DNS over HTTPS (DoH) to bypass cloud provider Port 53 firewalls.
 """
 import streamlit as st
 import pandas as pd
 import asyncio
-import aiodns
+import aiohttp
 import re
 import io
 import math
@@ -48,18 +48,29 @@ def format_and_trap_email(email):
         
     return clean_str, "PENDING_DNS"
 
-# --- ASYNC DNS ENGINE ---
+# --- ASYNC DNS-OVER-HTTPS ENGINE ---
 class EmailDomainValidator:
     def __init__(self, max_concurrent: int = 150):
         self.semaphore = asyncio.Semaphore(max_concurrent)
 
-    async def _check_mx(self, domain: str, resolver: aiodns.DNSResolver) -> str:
+    async def _check_mx(self, session: aiohttp.ClientSession, domain: str) -> str:
         async with self.semaphore:
             try:
-                answers = await resolver.query(domain, 'MX')
-                return "VALID_DOMAIN" if answers else "NO_MX_RECORDS"
-            except aiodns.error.DNSError:
-                return "DEAD_DOMAIN"
+                # Use Google's DoH API to bypass Port 53 blocks
+                url = f"https://dns.google/resolve?name={domain}&type=MX"
+                async with session.get(url, timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        # Status 0 is NOERROR. Look for an Answer array containing MX records.
+                        if data.get('Status') == 0 and 'Answer' in data:
+                            return "VALID_DOMAIN"
+                        # Status 3 is NXDOMAIN (domain does not exist)
+                        elif data.get('Status') == 3:
+                            return "DEAD_DOMAIN"
+                        else:
+                            return "NO_MX_RECORDS"
+                    else:
+                        return "DNS_TIMEOUT"
             except Exception:
                 return "DNS_TIMEOUT"
 
@@ -69,33 +80,30 @@ class EmailDomainValidator:
         if 'Email_Domain_Status' not in df_result.columns:
             df_result['Email_Domain_Status'] = ''
 
-        # THE FIX: Remove hardcoded nameservers so Railway uses its native internal resolver.
-        # This bypasses the Port 53 outbound UDP firewall block.
-        resolver = aiodns.DNSResolver()
-        
         tasks = []
         indices = []
 
-        for idx, row in df_result.iterrows():
-            current_status = row.get('Email_Domain_Status', '')
-            
-            # Only ping domains that passed the Regex Phase
-            if current_status in ["PENDING_DNS", "WARNING: (GENERIC PREFIX)"]:
-                email = str(row.get(email_col, ''))
-                domain = email.split('@')[-1]
+        async with aiohttp.ClientSession() as session:
+            for idx, row in df_result.iterrows():
+                current_status = row.get('Email_Domain_Status', '')
                 
-                tasks.append(self._check_mx(domain, resolver))
-                indices.append(idx)
+                # Only ping domains that passed the Regex Phase
+                if current_status in ["PENDING_DNS", "WARNING: (GENERIC PREFIX)"]:
+                    email = str(row.get(email_col, ''))
+                    domain = email.split('@')[-1]
+                    
+                    tasks.append(self._check_mx(session, domain))
+                    indices.append(idx)
 
-        if tasks:
-            results = await asyncio.gather(*tasks)
-            for i, res in enumerate(results):
-                original_status = df_result.at[indices[i], 'Email_Domain_Status']
-                # Preserve the generic warning if the domain is valid
-                if original_status == "WARNING: (GENERIC PREFIX)" and res == "VALID_DOMAIN":
-                    df_result.at[indices[i], 'Email_Domain_Status'] = "VALID_DOMAIN (GENERIC PREFIX)"
-                else:
-                    df_result.at[indices[i], 'Email_Domain_Status'] = res
+            if tasks:
+                results = await asyncio.gather(*tasks)
+                for i, res in enumerate(results):
+                    original_status = df_result.at[indices[i], 'Email_Domain_Status']
+                    # Preserve the generic warning if the domain is valid
+                    if original_status == "WARNING: (GENERIC PREFIX)" and res == "VALID_DOMAIN":
+                        df_result.at[indices[i], 'Email_Domain_Status'] = "VALID_DOMAIN (GENERIC PREFIX)"
+                    else:
+                        df_result.at[indices[i], 'Email_Domain_Status'] = res
 
         return df_result
 
@@ -112,7 +120,6 @@ def generate_excel(df):
     if not df.empty:
         worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
         
-        # Conditional Formatting for the Status Column
         status_idx = df.columns.get_loc('Email_Domain_Status')
         red_fmt = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006'})
         green_fmt = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100'})
@@ -147,7 +154,6 @@ if uploaded_file:
         
     st.success(f"File loaded successfully! ({len(df):,} rows)")
     
-    # --- AUTO-DETECT EMAIL COLUMN ---
     columns = list(df.columns)
     guess_idx = 0
     for i, col in enumerate(columns):
@@ -166,7 +172,6 @@ if uploaded_file:
     if st.button("🚀 Run DNS Validation", type="primary", use_container_width=True):
         st.info("💡 Tip: You can cancel this process at any time by clicking 'Stop' in the top right.")
         
-        # Phase 1: Local Regex Scrubber
         with st.spinner("Applying regex formatting and spam traps..."):
             df['Email_Domain_Status'] = ''
             for idx, row in df.iterrows():
@@ -175,7 +180,6 @@ if uploaded_file:
                 df.at[idx, target_col] = clean_em
                 df.at[idx, 'Email_Domain_Status'] = status
                 
-        # Phase 2: Async DNS Engine
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         
@@ -197,7 +201,6 @@ if uploaded_file:
         df_final = pd.concat(processed_chunks, ignore_index=True)
         progress_bar.empty()
         
-        # Phase 3: Self-Healing (Optional)
         if heal_data:
             bad_statuses = ['DEAD_DOMAIN', 'NO_MX_RECORDS', 'INVALID_FORMAT']
             mask_dead = df_final['Email_Domain_Status'].str.contains('|'.join(bad_statuses))
