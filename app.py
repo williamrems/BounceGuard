@@ -12,7 +12,7 @@ import io
 import math
 import os
 
-st.set_page_config(page_title="BounceGuard | ContractorFlow", page_icon="🛡️", layout="centered")
+st.set_page_config(page_title="BounceGuard | ContractorFlow", page_icon="🛡️", layout="wide")
 
 # --- BRANDING ---
 col_logo, col_title = st.columns([1, 4])
@@ -248,12 +248,19 @@ with tab_bulk:
             total_emails = len(df_final[df_final[target_col] != ""])
             bounces = df_final['BounceGuard_Status'].str.contains('Bounce').sum()
             safe = df_final['BounceGuard_Status'].str.contains('Safe').sum()
+            caution = df_final['BounceGuard_Status'].str.contains('Caution').sum()
             
             st.markdown("### 🏆 Protection Report")
-            col_a, col_b, col_c = st.columns(3)
+            col_a, col_b, col_c, col_d = st.columns(4)
             col_a.metric("Emails Processed", f"{total_emails:,}")
             col_b.metric("✅ Safe to Send", f"{safe:,}")
-            col_c.metric("🚨 Hard Bounces Prevented", f"{bounces:,}", delta="Reputation Saved", delta_color="normal")
+            col_c.metric("⚠️ Caution (Role-Based)", f"{caution:,}")
+            col_d.metric("🚨 Hard Bounces Prevented", f"{bounces:,}", delta="Reputation Saved", delta_color="normal")
+            
+            st.markdown("---")
+            st.markdown("##### What do these numbers mean for your business?")
+            st.info("**🚨 Hard Bounces:** Sending mail to dead or fake addresses tells providers like Gmail and Outlook that you are a spammer. If you do it too much, your legitimate emails to real customers will start going straight to the junk folder. We trapped these so your sender reputation stays pristine.")
+            st.warning("**⚠️ Caution (Role-Based):** Emails starting with `info@`, `sales@`, or `admin@` are generic inboxes. They are often ignored, or worse, someone marks your email as spam because they don't know who signed up. It is safe to email them, but don't expect high engagement.")
             st.markdown("---")
 
             # --- SELF HEALING ---
