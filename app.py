@@ -205,6 +205,9 @@ with tab_bulk:
     st.markdown("Upload your contact list to verify deliverability before you send your next campaign.")
     uploaded_file = st.file_uploader("Upload Data (.csv or .xlsx)", type=['csv', 'xlsx'])
 
+    if 'df_final' not in st.session_state:
+        st.session_state.df_final = None
+
     if uploaded_file:
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file)
@@ -259,54 +262,78 @@ with tab_bulk:
             df_final = pd.concat(processed_chunks, ignore_index=True)
             progress_bar.empty()
             
-            # --- ROI DASHBOARD ---
-            bounces = df_final['BounceGuard_Status'].str.contains('Bounce').sum()
-            safe = df_final['BounceGuard_Status'].str.contains('Safe').sum()
-            caution = df_final['BounceGuard_Status'].str.contains('Caution').sum()
-            
-            st.markdown("### 🏆 Protection Report")
-            col_a, col_b, col_c, col_d = st.columns(4)
-            col_a.metric("Emails Processed", f"{total_processed:,}")
-            col_b.metric("✅ Safe to Send", f"{safe:,}")
-            col_c.metric("⚠️ Caution (Role-Based)", f"{caution:,}")
-            col_d.metric("🚨 Hard Bounces Prevented", f"{bounces:,}", delta="Reputation Saved", delta_color="normal")
-            
-            st.markdown("---")
-            st.markdown("##### What do these numbers mean for your business?")
-            st.info("**🚨 Hard Bounces:** Sending mail to dead or fake addresses tells providers like Gmail and Outlook that you are a spammer. If you do it too much, your legitimate emails to real customers will start going straight to the junk folder. We trapped these so your sender reputation stays pristine.")
-            st.warning("**⚠️ Caution (Role-Based):** Emails starting with `info@`, `sales@`, or `admin@` are generic inboxes. They are often ignored, or worse, someone marks your email as spam because they don't know who signed up. It is safe to email them, but don't expect high engagement.")
-            
-            # --- ADVANCED ROUTING STATS EXPANDER ---
-            with st.expander("⚙️ Engine Diagnostics & Routing Stats (For Admins)", expanded=False):
-                efficiency_rate = ((fast_pass_count + local_bounce_count) / max(total_processed, 1)) * 100
-                st.markdown(f"""
-                **Network Throughput Analysis**
-                * **Total Valid Inputs:** {total_processed:,}
-                * **Locally Verified (Fast-Pass):** {fast_pass_count:,} *(Bypassed network check)*
-                * **Locally Trapped (Regex/Spam):** {local_bounce_count:,} *(Bypassed network check)*
-                * **Live DNS Pings Executed:** {dns_ping_count:,} *(Required external API routing)*
-                
-                **Efficiency Rate:** **{efficiency_rate:.1f}%** of this list was processed instantly via local architecture without consuming external API bandwidth.
-                """)
-            st.markdown("---")
-
             # --- SELF HEALING ---
             if heal_data:
                 mask_dead = df_final['BounceGuard_Status'].str.contains('Bounce')
                 df_final['Legacy_Invalid_Email'] = ''
                 df_final.loc[mask_dead, 'Legacy_Invalid_Email'] = df_final.loc[mask_dead, target_col]
                 df_final.loc[mask_dead, target_col] = ''
+                
+            # Save to session state so it persists during filtering
+            st.session_state.df_final = df_final
+            st.session_state.total_processed = total_processed
+            st.session_state.fast_pass_count = fast_pass_count
+            st.session_state.local_bounce_count = local_bounce_count
+            st.session_state.dns_ping_count = dns_ping_count
+            st.session_state.target_col = target_col
+
+        # --- RENDER DASHBOARD & SLICER (If data exists in state) ---
+        if st.session_state.df_final is not None:
+            df_final = st.session_state.df_final
+            target_col = st.session_state.target_col
+            
+            bounces = df_final['BounceGuard_Status'].str.contains('Bounce').sum()
+            safe = df_final['BounceGuard_Status'].str.contains('Safe').sum()
+            caution = df_final['BounceGuard_Status'].str.contains('Caution').sum()
+            
+            st.markdown("### 🏆 Protection Report")
+            col_a, col_b, col_c, col_d = st.columns(4)
+            col_a.metric("Emails Processed", f"{st.session_state.total_processed:,}")
+            col_b.metric("✅ Safe to Send", f"{safe:,}")
+            col_c.metric("⚠️ Caution (Role-Based)", f"{caution:,}")
+            col_d.metric("🚨 Hard Bounces Prevented", f"{bounces:,}", delta="Reputation Saved", delta_color="normal")
+            
+            st.markdown("---")
+            
+            with st.expander("⚙️ Stats for Nerds", expanded=False):
+                efficiency_rate = ((st.session_state.fast_pass_count + st.session_state.local_bounce_count) / max(st.session_state.total_processed, 1)) * 100
+                st.markdown(f"""
+                **Network Throughput Analysis**
+                * **Total Valid Inputs:** {st.session_state.total_processed:,}
+                * **Locally Verified (Fast-Pass):** {st.session_state.fast_pass_count:,} *(Bypassed network check)*
+                * **Locally Trapped (Regex/Spam):** {st.session_state.local_bounce_count:,} *(Bypassed network check)*
+                * **Live DNS Pings Executed:** {st.session_state.dns_ping_count:,} *(Required external API routing)*
+                
+                **Efficiency Rate:** **{efficiency_rate:.1f}%** of this list was processed instantly via local architecture without consuming external API bandwidth.
+                """)
+            
+            # --- THE INTERACTIVE SLICER ---
+            st.markdown("### 🔍 Data Explorer")
+            filter_choice = st.radio(
+                "Filter Results:",
+                ["All Records", "✅ Safe to Send", "⚠️ Caution (Role-Based)", "🚨 Hard Bounces"],
+                horizontal=True
+            )
+            
+            # Apply Filter for display only
+            df_display = df_final.copy()
+            if "Safe" in filter_choice:
+                df_display = df_display[df_display['BounceGuard_Status'].str.contains('Safe')]
+            elif "Caution" in filter_choice:
+                df_display = df_display[df_display['BounceGuard_Status'].str.contains('Caution')]
+            elif "Bounce" in filter_choice:
+                df_display = df_display[df_display['BounceGuard_Status'].str.contains('Bounce')]
 
             # --- SCROLL FIX: Pin Email and Status to the front ---
-            display_cols = df_final.columns.tolist()
+            display_cols = df_display.columns.tolist()
             display_cols.insert(0, display_cols.pop(display_cols.index('BounceGuard_Status')))
             display_cols.insert(0, display_cols.pop(display_cols.index(target_col)))
             
-            st.dataframe(df_final[display_cols].head(100))
+            st.dataframe(df_display[display_cols].head(100))
             
             st.download_button(
-                label="📥 Download Validated List (.xlsx)",
-                data=generate_excel(df_final),
+                label="📥 Download Full Validated List (.xlsx)",
+                data=generate_excel(df_final),  # ALWAYS generates from the full, unfiltered df_final
                 file_name="BounceGuard_Validated_List.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
