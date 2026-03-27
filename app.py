@@ -145,7 +145,7 @@ def generate_excel(df):
 
 
 # --- UI ROUTING ---
-tab_single, tab_bulk = st.tabs(["🎯 Quick Check", "📁 Bulk List Engine"])
+tab_single, tab_bulk = st.tabs(["🎯 Quick Check", "📁 Bulk List Scrubber"])
 
 # ==========================================
 # TAB 1: SINGLE CHECK TERMINAL
@@ -189,10 +189,11 @@ with tab_single:
                     st.error(f"🚨 **Will Bounce**: Do not send to this address. It will harm your sender reputation.")
 
 # ==========================================
-# TAB 2: BULK LIST ENGINE
+# TAB 2: BULK LIST SCRUBBER
 # ==========================================
 with tab_bulk:
-    st.markdown("### Enterprise Batch Processor")
+    st.markdown("### Bulk List Scrubber")
+    st.markdown("Upload your contact list to verify deliverability before you send your next campaign.")
     uploaded_file = st.file_uploader("Upload Data (.csv or .xlsx)", type=['csv', 'xlsx'])
 
     if uploaded_file:
