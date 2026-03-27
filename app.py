@@ -17,7 +17,6 @@ st.set_page_config(page_title="BounceGuard | ContractorFlow", page_icon="🛡️
 # --- BRANDING ---
 col_logo, col_title = st.columns([1, 4])
 with col_logo:
-    # Drop a file named 'logo.png' into your repo, and it will render here automatically.
     if os.path.exists("logo.png"):
         st.image("logo.png", use_column_width=True)
     else:
@@ -30,6 +29,14 @@ with col_title:
 FAKE_LOCAL_PARTS = {'test', 'something', 'anything', 'fake', 'email', 'noemail', 'donotemail', 'spam', 'customer', 'na', 'none', 'no'}
 GENERIC_EMAIL_PREFIXES = {'info', 'admin', 'sales', 'support', 'contact', 'hello', 'office'}
 FAKE_EMAILS_FULL = {'na@na.com', 'none@none.com', 'na@gmail.com', 'none@gmail.com', 'test@test.com', 'email@email.com', 'no@email.com'}
+
+# SURGICAL DOMAIN TRAP: Catches example.net, testdomain.com, and known burner email providers
+# without accidentally blocking valid domains like "smartestate.com"
+SUSPECT_DOMAIN_PATTERN = re.compile(
+    r'^(fake|demo|test|mock|example|sample)|'
+    r'(mailinator|yopmail|tempmail|10minute|guerrillamail|sharklasers|throwawaymail)\.', 
+    re.IGNORECASE
+)
 
 # --- REGEX ENGINE ---
 def format_and_trap_email(email):
@@ -50,10 +57,11 @@ def format_and_trap_email(email):
         if re.search(r'\d+bad\d+', local_part) or local_part == 'bad':
             return clean_str, "INVALID_FORMAT: (SUSPECT SPAM)"
             
-        if local_part in FAKE_LOCAL_PARTS or domain_part in {'example.com', 'fake.com'}:
+        if local_part in FAKE_LOCAL_PARTS:
             return clean_str, "INVALID_FORMAT: (KNOWN FAKE)"
             
-        if re.search(r'(fake|demo|test|mock)', domain_part):
+        # NEW: Aggressive Burner & Demo Domain Trap
+        if SUSPECT_DOMAIN_PATTERN.search(domain_part):
             return clean_str, "INVALID_FORMAT: (SUSPECT DOMAIN)"
             
         if local_part in GENERIC_EMAIL_PREFIXES:
@@ -88,7 +96,6 @@ class EmailDomainValidator:
                 return "DNS_TIMEOUT"
 
     async def check_single(self, domain: str) -> str:
-        """Bypass for the Single-Check Terminal"""
         async with aiohttp.ClientSession() as session:
             return await self._check_mx(session, domain)
 
@@ -198,7 +205,7 @@ with tab_single:
                     st.warning(f"⚠️ **{final_status}**: The domain is active, but this is a role-based address (info@, admin@).")
                 else:
                     st.error(f"**{clean_em}**")
-                    st.error(f"🚨 **{final_status}**: This email will bounce. Do not send.")
+                    st.error(f"🚨 **{final_status}**: This email will bounce or is an invalid entry. Do not send.")
 
 # ==========================================
 # TAB 2: BULK LIST ENGINE
