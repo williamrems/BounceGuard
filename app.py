@@ -40,6 +40,10 @@ def format_and_trap_email(email):
         if local_part in FAKE_LOCAL_PARTS or domain_part in {'example.com', 'fake.com'}:
             return clean_str, "INVALID_FORMAT: (KNOWN FAKE)"
             
+        # NEW TRAP: Catch domains containing junk words
+        if re.search(r'(fake|demo|test|mock)', domain_part):
+            return clean_str, "INVALID_FORMAT: (SUSPECT DOMAIN)"
+            
         if local_part in GENERIC_EMAIL_PREFIXES:
             return clean_str, "WARNING: (GENERIC PREFIX)"
             
