@@ -31,7 +31,6 @@ GENERIC_EMAIL_PREFIXES = {'info', 'admin', 'sales', 'support', 'contact', 'hello
 FAKE_EMAILS_FULL = {'na@na.com', 'none@none.com', 'na@gmail.com', 'none@gmail.com', 'test@test.com', 'email@email.com', 'no@email.com'}
 SUSPECT_DOMAIN_PATTERN = re.compile(r'^(fake|demo|test|mock|example|sample)|(mailinator|yopmail|tempmail|10minute|guerrillamail|sharklasers|throwawaymail)\.', re.IGNORECASE)
 
-# THE FAST-PASS WHITELIST: Skips DNS pinging for known enterprise mail providers.
 KNOWN_SAFE_DOMAINS = {
     'gmail.com', 'yahoo.com', 'hotmail.com', 'aol.com', 'outlook.com', 
     'live.com', 'icloud.com', 'comcast.net', 'msn.com', 'sbcglobal.net', 
@@ -59,7 +58,6 @@ def format_and_trap_email(email):
         if local_part in GENERIC_EMAIL_PREFIXES:
             return clean_str, "⚠️ Caution (Role-Based)"
             
-        # FAST-PASS: If syntax is good and domain is known, bypass DNS completely.
         if domain_part in KNOWN_SAFE_DOMAINS:
             return clean_str, "✅ Safe"
             
@@ -233,6 +231,12 @@ with tab_bulk:
                     clean_em, status = format_and_trap_email(raw_email)
                     df.at[idx, target_col] = clean_em
                     df.at[idx, 'BounceGuard_Status'] = status
+                
+                # --- PRE-DNS METRICS CAPTURE ---
+                total_processed = len(df[df[target_col] != ""])
+                fast_pass_count = (df['BounceGuard_Status'] == '✅ Safe').sum()
+                local_bounce_count = df['BounceGuard_Status'].str.contains('Bounce').sum()
+                dns_ping_count = df['BounceGuard_Status'].isin(["PENDING", "⚠️ Caution (Role-Based)"]).sum()
                     
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -256,14 +260,13 @@ with tab_bulk:
             progress_bar.empty()
             
             # --- ROI DASHBOARD ---
-            total_emails = len(df_final[df_final[target_col] != ""])
             bounces = df_final['BounceGuard_Status'].str.contains('Bounce').sum()
             safe = df_final['BounceGuard_Status'].str.contains('Safe').sum()
             caution = df_final['BounceGuard_Status'].str.contains('Caution').sum()
             
             st.markdown("### 🏆 Protection Report")
             col_a, col_b, col_c, col_d = st.columns(4)
-            col_a.metric("Emails Processed", f"{total_emails:,}")
+            col_a.metric("Emails Processed", f"{total_processed:,}")
             col_b.metric("✅ Safe to Send", f"{safe:,}")
             col_c.metric("⚠️ Caution (Role-Based)", f"{caution:,}")
             col_d.metric("🚨 Hard Bounces Prevented", f"{bounces:,}", delta="Reputation Saved", delta_color="normal")
@@ -272,6 +275,19 @@ with tab_bulk:
             st.markdown("##### What do these numbers mean for your business?")
             st.info("**🚨 Hard Bounces:** Sending mail to dead or fake addresses tells providers like Gmail and Outlook that you are a spammer. If you do it too much, your legitimate emails to real customers will start going straight to the junk folder. We trapped these so your sender reputation stays pristine.")
             st.warning("**⚠️ Caution (Role-Based):** Emails starting with `info@`, `sales@`, or `admin@` are generic inboxes. They are often ignored, or worse, someone marks your email as spam because they don't know who signed up. It is safe to email them, but don't expect high engagement.")
+            
+            # --- ADVANCED ROUTING STATS EXPANDER ---
+            with st.expander("⚙️ Engine Diagnostics & Routing Stats (For Admins)", expanded=False):
+                efficiency_rate = ((fast_pass_count + local_bounce_count) / max(total_processed, 1)) * 100
+                st.markdown(f"""
+                **Network Throughput Analysis**
+                * **Total Valid Inputs:** {total_processed:,}
+                * **Locally Verified (Fast-Pass):** {fast_pass_count:,} *(Bypassed network check)*
+                * **Locally Trapped (Regex/Spam):** {local_bounce_count:,} *(Bypassed network check)*
+                * **Live DNS Pings Executed:** {dns_ping_count:,} *(Required external API routing)*
+                
+                **Efficiency Rate:** **{efficiency_rate:.1f}%** of this list was processed instantly via local architecture without consuming external API bandwidth.
+                """)
             st.markdown("---")
 
             # --- SELF HEALING ---
