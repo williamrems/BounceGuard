@@ -31,6 +31,13 @@ GENERIC_EMAIL_PREFIXES = {'info', 'admin', 'sales', 'support', 'contact', 'hello
 FAKE_EMAILS_FULL = {'na@na.com', 'none@none.com', 'na@gmail.com', 'none@gmail.com', 'test@test.com', 'email@email.com', 'no@email.com'}
 SUSPECT_DOMAIN_PATTERN = re.compile(r'^(fake|demo|test|mock|example|sample)|(mailinator|yopmail|tempmail|10minute|guerrillamail|sharklasers|throwawaymail)\.', re.IGNORECASE)
 
+# THE FAST-PASS WHITELIST: Skips DNS pinging for known enterprise mail providers.
+KNOWN_SAFE_DOMAINS = {
+    'gmail.com', 'yahoo.com', 'hotmail.com', 'aol.com', 'outlook.com', 
+    'live.com', 'icloud.com', 'comcast.net', 'msn.com', 'sbcglobal.net', 
+    'att.net', 'verizon.net', 'mac.com', 'me.com', 'bellsouth.net', 'charter.net'
+}
+
 # --- SIMPLIFIED REGEX ENGINE ---
 def format_and_trap_email(email):
     """Phase 1: Local Traps mapped to simple outputs"""
@@ -51,6 +58,10 @@ def format_and_trap_email(email):
             
         if local_part in GENERIC_EMAIL_PREFIXES:
             return clean_str, "⚠️ Caution (Role-Based)"
+            
+        # FAST-PASS: If syntax is good and domain is known, bypass DNS completely.
+        if domain_part in KNOWN_SAFE_DOMAINS:
+            return clean_str, "✅ Safe"
             
     except Exception:
         pass
