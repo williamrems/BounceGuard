@@ -80,6 +80,9 @@ DEEP_API_INVALID = "🚨 Verification API: Invalid"
 DEEP_API_RISKY = "⚠️ Verification API: Risky / Unknown"
 DEEP_API_SKIPPED = "Verification API Skipped"
 
+PAID_VERIFICATION_YES = "Yes"
+PAID_VERIFICATION_NO = "No"
+
 
 # ============================================================
 # LOCAL RULE CONSTANTS
@@ -581,6 +584,93 @@ def is_deep_scan_candidate(row: pd.Series, email_col: str) -> Tuple[bool, str]:
     return True, "Eligible for deep scan."
 
 
+def apply_scan_eligibility_columns(df: pd.DataFrame, email_col: str) -> pd.DataFrame:
+    """
+    Computes DeepScan_Eligible without running the deep scan.
+    This lets the user see exactly which records would be deep scanned.
+    """
+    df_result = df.copy()
+
+    for col in [
+        "DeepScan_Eligible",
+        "DeepScan_Status",
+        "DeepScan_Reason",
+        "DeepScan_Recommendation",
+        "DeepScan_MX_Resolvers_Found",
+        "DeepScan_Resolver_Errors",
+        "PaidVerification_Eligible",
+        "PaidVerification_Reason",
+        "VerificationAPI_Status"
+    ]:
+        if col not in df_result.columns:
+            df_result[col] = ""
+
+    for idx, row in df_result.iterrows():
+        eligible, reason = is_deep_scan_candidate(row, email_col)
+
+        df_result.at[idx, "DeepScan_Eligible"] = PAID_VERIFICATION_YES if eligible else PAID_VERIFICATION_NO
+        df_result.at[idx, "DeepScan_Status"] = DEEP_PENDING if eligible else DEEP_NOT_ELIGIBLE
+        df_result.at[idx, "DeepScan_Reason"] = reason
+        df_result.at[idx, "DeepScan_Recommendation"] = "Run deep scan before deciding whether third-party verification is needed." if eligible else ""
+        df_result.at[idx, "PaidVerification_Eligible"] = PAID_VERIFICATION_NO
+        df_result.at[idx, "PaidVerification_Reason"] = "Run deep scan first." if eligible else "Not a clean deep-scan candidate."
+
+        if not str(df_result.at[idx, "VerificationAPI_Status"]).strip():
+            df_result.at[idx, "VerificationAPI_Status"] = DEEP_API_SKIPPED
+
+    return df_result
+
+
+def apply_paid_verification_eligibility(df: pd.DataFrame, email_col: str) -> pd.DataFrame:
+    """
+    Paid verification is the final paid layer, not the same thing as deep scan.
+    It should only be used after BounceGuard has narrowed the list down.
+    """
+    df_result = df.copy()
+
+    for col in ["PaidVerification_Eligible", "PaidVerification_Reason"]:
+        if col not in df_result.columns:
+            df_result[col] = ""
+
+    for idx, row in df_result.iterrows():
+        clean_email = str(row.get(email_col, "")).strip().lower()
+        status = str(row.get("BounceGuard_Status", "")).strip()
+        deep_status = str(row.get("DeepScan_Status", "")).strip()
+        local_part, domain = split_email(clean_email)
+
+        eligible, skip_reason = is_deep_scan_candidate(row, email_col)
+
+        if is_salesforce_sandbox_invalid_domain(domain):
+            df_result.at[idx, "PaidVerification_Eligible"] = PAID_VERIFICATION_NO
+            df_result.at[idx, "PaidVerification_Reason"] = "Salesforce sandbox .invalid email. Do not pay to verify."
+        elif is_role_based_email(clean_email):
+            df_result.at[idx, "PaidVerification_Eligible"] = PAID_VERIFICATION_NO
+            df_result.at[idx, "PaidVerification_Reason"] = "Role-based address. Skipped by rule."
+        elif contains_junk_term_anywhere(clean_email) or local_part in FAKE_LOCAL_PARTS:
+            df_result.at[idx, "PaidVerification_Eligible"] = PAID_VERIFICATION_NO
+            df_result.at[idx, "PaidVerification_Reason"] = "Obvious junk or placeholder. Do not pay to verify."
+        elif status in [STATUS_HIGH_RISK, STATUS_DISPOSABLE, STATUS_SANDBOX_INVALID, STATUS_TYPO]:
+            df_result.at[idx, "PaidVerification_Eligible"] = PAID_VERIFICATION_NO
+            df_result.at[idx, "PaidVerification_Reason"] = "Suppress or correct before any paid verification."
+        elif deep_status == DEEP_MX_CONFIRMED:
+            df_result.at[idx, "PaidVerification_Eligible"] = PAID_VERIFICATION_NO
+            df_result.at[idx, "PaidVerification_Reason"] = "Deep scan recovered the domain. Paid check is optional, not required."
+        elif deep_status in [DEEP_WEBSITE_ONLY, DEEP_DNS_INCONCLUSIVE]:
+            df_result.at[idx, "PaidVerification_Eligible"] = PAID_VERIFICATION_YES
+            df_result.at[idx, "PaidVerification_Reason"] = "Clean record remains unresolved after deep scan."
+        elif deep_status == DEEP_NO_MX_CONFIRMED:
+            df_result.at[idx, "PaidVerification_Eligible"] = PAID_VERIFICATION_NO
+            df_result.at[idx, "PaidVerification_Reason"] = "Deep scan confirmed no MX. Paid check is likely wasted."
+        elif status in [STATUS_NO_MX, STATUS_UNKNOWN] and eligible:
+            df_result.at[idx, "PaidVerification_Eligible"] = PAID_VERIFICATION_NO
+            df_result.at[idx, "PaidVerification_Reason"] = "Run deep scan first."
+        else:
+            df_result.at[idx, "PaidVerification_Eligible"] = PAID_VERIFICATION_NO
+            df_result.at[idx, "PaidVerification_Reason"] = skip_reason if not eligible else "No paid verification needed."
+
+    return df_result
+
+
 # ============================================================
 # MULTI-RESOLVER DEEP DNS SCANNER
 # ============================================================
@@ -741,7 +831,9 @@ class DeepDomainScanner:
             "DeepScan_Reason",
             "DeepScan_Recommendation",
             "DeepScan_MX_Resolvers_Found",
-            "DeepScan_Resolver_Errors"
+            "DeepScan_Resolver_Errors",
+            "PaidVerification_Eligible",
+            "PaidVerification_Reason"
         ]:
             if col not in df_result.columns:
                 df_result[col] = ""
@@ -801,6 +893,7 @@ class DeepDomainScanner:
                         df_result.at[idx, "BounceGuard_Reason"] = scan_result.reason
                         df_result.at[idx, "BounceGuard_Recommendation"] = scan_result.recommendation
 
+        df_result = apply_paid_verification_eligibility(df_result, email_col)
         return df_result
 
 
@@ -966,11 +1059,10 @@ async def run_verification_api_on_deep_candidates(
 
     async with aiohttp.ClientSession() as session:
         for idx, row in df_result.iterrows():
-            deep_eligible = str(row.get("DeepScan_Eligible", "")).strip() == "Yes"
+            paid_eligible = str(row.get("PaidVerification_Eligible", "")).strip() == PAID_VERIFICATION_YES
 
-            # API is only used on the clean questionable group, not role-based,
-            # not .invalid, and not already clean domain-verified from first pass.
-            if deep_eligible:
+            # API is only used on records that remain unresolved after BounceGuard's free checks.
+            if paid_eligible:
                 email = str(row.get(email_col, "")).strip().lower()
                 tasks.append(run_one(session, idx, email))
 
@@ -1164,6 +1256,10 @@ def status_matches_filter(df: pd.DataFrame, filter_choice: str) -> pd.DataFrame:
         if "DeepScan_Eligible" not in df.columns:
             return df.iloc[0:0]
         return df[df["DeepScan_Eligible"].eq("Yes")]
+    if filter_choice == "💳 Paid API Candidates":
+        if "PaidVerification_Eligible" not in df.columns:
+            return df.iloc[0:0]
+        return df[df["PaidVerification_Eligible"].eq(PAID_VERIFICATION_YES)]
     if filter_choice == "⚪ Empty":
         return df[df["BounceGuard_Status"].eq(STATUS_EMPTY)]
     return df
@@ -1196,7 +1292,7 @@ api_key_default = st.sidebar.text_input(
 )
 
 st.sidebar.caption(
-    "Deep scan skips Salesforce .invalid emails, role-based addresses like info@ or sales@, obvious junk, disposable emails, and typo domains."
+    "Deep Scan is free and separate from ZeroBounce/NeverBounce. Paid verification only runs on records marked Paid API Candidates."
 )
 
 
@@ -1316,7 +1412,6 @@ with tab_bulk:
 
     df = None
     target_col = None
-    heal_data = False
     auto_deep_scan = auto_deep_scan_default
 
     if uploaded_file:
@@ -1341,20 +1436,11 @@ with tab_bulk:
         target_col = st.selectbox("🎯 Target Email Column:", options=columns, index=guess_idx)
         st.session_state.target_col = target_col
 
-        col_settings_a, col_settings_b = st.columns([1, 1])
-        with col_settings_a:
-            heal_data = st.checkbox(
-                "Self-Heal Suppressed Emails",
-                value=False,
-                help="Clears high-risk emails and stores the original value in Legacy_Invalid_Email."
-            )
-
-        with col_settings_b:
-            auto_deep_scan = st.checkbox(
-                "Run automatic deep scan",
-                value=auto_deep_scan_default,
-                help="Only checks clean questionable records after the first pass."
-            )
+        auto_deep_scan = st.checkbox(
+            "Run automatic deep scan",
+            value=auto_deep_scan_default,
+            help="Only checks clean questionable records after the first pass."
+        )
 
         if st.button("🚀 Run Batch Validation", type="primary", use_container_width=True):
             with st.spinner("Running local checks..."):
@@ -1401,15 +1487,9 @@ with tab_bulk:
             df_final = pd.concat(processed_chunks, ignore_index=True)
             progress_bar.empty()
 
-            # Always add the columns. This keeps the table, filters, and download stable
-            # even when automatic deep scan is turned off.
-            df_final["DeepScan_Eligible"] = "No"
-            df_final["DeepScan_Status"] = DEEP_NOT_NEEDED
-            df_final["DeepScan_Reason"] = "Deep scan has not been run yet."
-            df_final["DeepScan_Recommendation"] = ""
-            df_final["DeepScan_MX_Resolvers_Found"] = ""
-            df_final["DeepScan_Resolver_Errors"] = ""
-            df_final["VerificationAPI_Status"] = DEEP_API_SKIPPED
+            # Always compute eligibility, even when automatic deep scan is turned off.
+            # This lets the user see exactly which records would be deep scanned.
+            df_final = apply_scan_eligibility_columns(df_final, target_col)
 
             if auto_deep_scan:
                 st.info("Running deep scan on clean questionable records only...")
@@ -1491,14 +1571,8 @@ with tab_bulk:
 
         if run_deep_now:
             with st.spinner("Running deep scan on current results..."):
-                # Reset deep scan columns so reruns are clean.
-                df_work = df_final.copy()
-                df_work["DeepScan_Eligible"] = "No"
-                df_work["DeepScan_Status"] = DEEP_NOT_NEEDED
-                df_work["DeepScan_Reason"] = "Deep scan has not been run yet."
-                df_work["DeepScan_Recommendation"] = ""
-                df_work["DeepScan_MX_Resolvers_Found"] = ""
-                df_work["DeepScan_Resolver_Errors"] = ""
+                # Reset/recompute eligibility so reruns are clean.
+                df_work = apply_scan_eligibility_columns(df_final.copy(), target_col)
 
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -1521,12 +1595,13 @@ with tab_bulk:
                 with st.spinner(f"Running {api_provider_default} on clean deep-scan candidates..."):
                     df_work = df_final.copy()
 
-                    # Make sure eligibility exists before sending anything to the API.
-                    if "DeepScan_Eligible" not in df_work.columns or not (df_work["DeepScan_Eligible"] == "Yes").any():
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        deep_scanner = DeepDomainScanner(max_concurrent=50)
-                        df_work = loop.run_until_complete(deep_scanner.process_candidates(df_work, target_col))
+                    # Make sure paid eligibility exists before sending anything to the API.
+                    if "PaidVerification_Eligible" not in df_work.columns:
+                        df_work = apply_paid_verification_eligibility(df_work, target_col)
+
+                    if not (df_work["PaidVerification_Eligible"] == PAID_VERIFICATION_YES).any():
+                        st.warning("No records are currently eligible for paid verification. Run deep scan first or review the skip reasons.")
+                        st.stop()
 
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
@@ -1552,15 +1627,17 @@ with tab_bulk:
         empty = df_final["BounceGuard_Status"].eq(STATUS_EMPTY).sum()
         deep_candidates = (df_final["DeepScan_Eligible"] == "Yes").sum() if "DeepScan_Eligible" in df_final.columns else 0
         deep_recovered = (df_final["DeepScan_Status"] == DEEP_MX_CONFIRMED).sum() if "DeepScan_Status" in df_final.columns else 0
+        paid_candidates = (df_final["PaidVerification_Eligible"] == PAID_VERIFICATION_YES).sum() if "PaidVerification_Eligible" in df_final.columns else 0
 
         st.markdown("### 🏆 Protection Report")
-        col_a, col_b, col_c, col_d, col_e, col_f = st.columns(6)
+        col_a, col_b, col_c, col_d, col_e, col_f, col_g = st.columns(7)
         col_a.metric("Emails Processed", f"{st.session_state.total_processed:,}")
         col_b.metric("✅ Domain Verified", f"{domain_verified:,}")
         col_c.metric("⚠️ Caution / Review", f"{caution:,}")
         col_d.metric("🚨 Suppress", f"{suppress:,}", delta="Risk Reduced", delta_color="normal")
         col_e.metric("🔬 Deep Scan Candidates", f"{deep_candidates:,}")
         col_f.metric("Recovered by Deep Scan", f"{deep_recovered:,}")
+        col_g.metric("Paid API Candidates", f"{paid_candidates:,}")
 
         st.markdown("---")
 
@@ -1578,6 +1655,7 @@ with tab_bulk:
             * **First-Pass DNS Checks:** {st.session_state.dns_ping_count:,}
             * **Clean Deep Scan Candidates:** {deep_candidates:,}
             * **Recovered by Deep Scan:** {deep_recovered:,}
+            * **Paid API Candidates:** {paid_candidates:,}
 
             **Local Efficiency Rate:** **{efficiency_rate:.1f}%** of this file was handled by local validation before DNS checks.
             """)
@@ -1585,7 +1663,7 @@ with tab_bulk:
         st.markdown("### 🔍 Data Explorer")
         filter_choice = st.radio(
             "Filter Results:",
-            ["All Records", "✅ Domain Verified", "⚠️ Caution / Review", "🚨 Suppress", "🔬 Deep Scan Candidates", "⚪ Empty"],
+            ["All Records", "✅ Domain Verified", "⚠️ Caution / Review", "🚨 Suppress", "🔬 Deep Scan Candidates", "💳 Paid API Candidates", "⚪ Empty"],
             horizontal=True
         )
 
@@ -1604,6 +1682,8 @@ with tab_bulk:
             "DeepScan_Status",
             "DeepScan_Reason",
             "DeepScan_Recommendation",
+            "PaidVerification_Eligible",
+            "PaidVerification_Reason",
             "VerificationAPI_Status",
             "VerificationAPI_Reason"
         ]
@@ -1647,7 +1727,11 @@ with tab_about:
 
     **Deep Scan**
 
-    When enabled, BounceGuard runs an extra check only on clean questionable records. It skips obvious junk, Salesforce sandbox emails, role-based addresses, and typo domains. The deeper check asks multiple DNS providers whether the domain can receive email.
+    Deep Scan is BounceGuard's free second-pass check. It asks multiple DNS providers whether a questionable domain can receive email. It skips obvious junk, Salesforce sandbox emails, role-based addresses, and typo domains.
+
+    **Third-Party Verification**
+
+    ZeroBounce or NeverBounce is separate from Deep Scan. These paid services should only be used on the small group of clean records that remain unresolved after BounceGuard's free checks.
 
     **Important**
 
@@ -1655,6 +1739,5 @@ with tab_about:
     """)
 
     st.info(
-        "For the highest-confidence results, connect a verification API such as ZeroBounce or NeverBounce. "
-        "BounceGuard will only use that API on the small group of clean questionable records."
+        "Recommended workflow: run BounceGuard first, run Deep Scan second, then send only the remaining paid API candidates to a third-party verifier."
     )
