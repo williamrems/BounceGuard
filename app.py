@@ -44,7 +44,7 @@ st.set_page_config(
 col_logo, col_title = st.columns([1, 4])
 with col_logo:
     if os.path.exists("logo.png"):
-        st.image("logo.png", use_container_width=True)
+        st.image("logo.png", use_column_width=True)
     else:
         st.markdown("<h1>🛡️</h1>", unsafe_allow_html=True)
 
