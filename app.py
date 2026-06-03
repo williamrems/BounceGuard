@@ -1517,12 +1517,6 @@ with tab_bulk:
 
             df_final = add_risk_score_columns(df_final)
 
-            suppress_statuses = [STATUS_HIGH_RISK, STATUS_DISPOSABLE, STATUS_NO_MX, STATUS_SANDBOX_INVALID, STATUS_TYPO]
-            if heal_data:
-                mask_dead = df_final["BounceGuard_Status"].isin(suppress_statuses)
-                df_final["Legacy_Invalid_Email"] = ""
-                df_final.loc[mask_dead, "Legacy_Invalid_Email"] = df_final.loc[mask_dead, target_col]
-                df_final.loc[mask_dead, target_col] = ""
 
             st.session_state.df_final = df_final
             st.session_state.total_processed = total_processed
