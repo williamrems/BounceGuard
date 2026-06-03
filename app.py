@@ -1161,7 +1161,9 @@ def status_matches_filter(df: pd.DataFrame, filter_choice: str) -> pd.DataFrame:
     if filter_choice == "🚨 Suppress":
         return df[df["BounceGuard_Status"].isin([STATUS_HIGH_RISK, STATUS_DISPOSABLE, STATUS_NO_MX, STATUS_SANDBOX_INVALID])]
     if filter_choice == "🔬 Deep Scan Candidates":
-        return df[df.get("DeepScan_Eligible", "").eq("Yes")]
+        if "DeepScan_Eligible" not in df.columns:
+            return df.iloc[0:0]
+        return df[df["DeepScan_Eligible"].eq("Yes")]
     if filter_choice == "⚪ Empty":
         return df[df["BounceGuard_Status"].eq(STATUS_EMPTY)]
     return df
@@ -1301,8 +1303,28 @@ with tab_bulk:
 
     if "df_final" not in st.session_state:
         st.session_state.df_final = None
+    if "target_col" not in st.session_state:
+        st.session_state.target_col = None
+    if "total_processed" not in st.session_state:
+        st.session_state.total_processed = 0
+    if "locally_completed_count" not in st.session_state:
+        st.session_state.locally_completed_count = 0
+    if "dns_ping_count" not in st.session_state:
+        st.session_state.dns_ping_count = 0
+    if "uploaded_file_name" not in st.session_state:
+        st.session_state.uploaded_file_name = None
+
+    df = None
+    target_col = None
+    heal_data = False
+    auto_deep_scan = auto_deep_scan_default
 
     if uploaded_file:
+        if st.session_state.uploaded_file_name != uploaded_file.name:
+            st.session_state.uploaded_file_name = uploaded_file.name
+            st.session_state.df_final = None
+            st.session_state.target_col = None
+
         if uploaded_file.name.endswith(".csv"):
             df = pd.read_csv(uploaded_file)
         else:
@@ -1317,6 +1339,7 @@ with tab_bulk:
 
         st.markdown("---")
         target_col = st.selectbox("🎯 Target Email Column:", options=columns, index=guess_idx)
+        st.session_state.target_col = target_col
 
         col_settings_a, col_settings_b = st.columns([1, 1])
         with col_settings_a:
@@ -1378,7 +1401,16 @@ with tab_bulk:
             df_final = pd.concat(processed_chunks, ignore_index=True)
             progress_bar.empty()
 
-            # Add deep scan columns and run only on clean questionable records.
+            # Always add the columns. This keeps the table, filters, and download stable
+            # even when automatic deep scan is turned off.
+            df_final["DeepScan_Eligible"] = "No"
+            df_final["DeepScan_Status"] = DEEP_NOT_NEEDED
+            df_final["DeepScan_Reason"] = "Deep scan has not been run yet."
+            df_final["DeepScan_Recommendation"] = ""
+            df_final["DeepScan_MX_Resolvers_Found"] = ""
+            df_final["DeepScan_Resolver_Errors"] = ""
+            df_final["VerificationAPI_Status"] = DEEP_API_SKIPPED
+
             if auto_deep_scan:
                 st.info("Running deep scan on clean questionable records only...")
                 loop = asyncio.new_event_loop()
@@ -1402,17 +1434,6 @@ with tab_bulk:
                             max_concurrent=10
                         )
                     )
-                else:
-                    if "VerificationAPI_Status" not in df_final.columns:
-                        df_final["VerificationAPI_Status"] = DEEP_API_SKIPPED
-            else:
-                df_final["DeepScan_Eligible"] = "No"
-                df_final["DeepScan_Status"] = DEEP_NOT_NEEDED
-                df_final["DeepScan_Reason"] = "Automatic deep scan was turned off."
-                df_final["DeepScan_Recommendation"] = ""
-                df_final["DeepScan_MX_Resolvers_Found"] = ""
-                df_final["DeepScan_Resolver_Errors"] = ""
-                df_final["VerificationAPI_Status"] = DEEP_API_SKIPPED
 
             df_final = add_risk_score_columns(df_final)
 
@@ -1428,86 +1449,178 @@ with tab_bulk:
             st.session_state.locally_completed_count = locally_completed_count
             st.session_state.dns_ping_count = dns_ping_count
             st.session_state.target_col = target_col
+            st.success("Batch validation complete.")
 
-        if st.session_state.df_final is not None:
-            df_final = st.session_state.df_final
-            target_col = st.session_state.target_col
+    else:
+        st.info("Upload a CSV or Excel file to start.")
 
-            domain_verified = df_final["BounceGuard_Status"].eq(STATUS_DOMAIN_VERIFIED).sum()
-            caution = df_final["BounceGuard_Status"].isin([STATUS_ROLE_BASED, STATUS_TYPO, STATUS_UNKNOWN]).sum()
-            suppress = df_final["BounceGuard_Status"].isin([STATUS_HIGH_RISK, STATUS_DISPOSABLE, STATUS_NO_MX, STATUS_SANDBOX_INVALID]).sum()
-            empty = df_final["BounceGuard_Status"].eq(STATUS_EMPTY).sum()
-            deep_candidates = (df_final.get("DeepScan_Eligible", "") == "Yes").sum() if "DeepScan_Eligible" in df_final.columns else 0
-            deep_recovered = (df_final.get("DeepScan_Status", "") == DEEP_MX_CONFIRMED).sum() if "DeepScan_Status" in df_final.columns else 0
+    # Results render outside of the upload block so they do not disappear on rerun.
+    if st.session_state.df_final is not None and st.session_state.target_col:
+        df_final = st.session_state.df_final
+        target_col = st.session_state.target_col
 
-            st.markdown("### 🏆 Protection Report")
-            col_a, col_b, col_c, col_d, col_e, col_f = st.columns(6)
-            col_a.metric("Emails Processed", f"{st.session_state.total_processed:,}")
-            col_b.metric("✅ Domain Verified", f"{domain_verified:,}")
-            col_c.metric("⚠️ Caution / Review", f"{caution:,}")
-            col_d.metric("🚨 Suppress", f"{suppress:,}", delta="Risk Reduced", delta_color="normal")
-            col_e.metric("🔬 Deep Scan Candidates", f"{deep_candidates:,}")
-            col_f.metric("Recovered by Deep Scan", f"{deep_recovered:,}")
+        st.markdown("---")
+        st.markdown("### Current Results")
 
-            st.markdown("---")
+        action_col_a, action_col_b, action_col_c = st.columns([1, 1, 1])
 
-            with st.expander("⚙️ Stats for Nerds", expanded=False):
-                efficiency_rate = (
-                    st.session_state.locally_completed_count / max(len(df_final), 1)
-                ) * 100
-
-                st.markdown(f"""
-                **Network Throughput Analysis**
-
-                * **Total Rows:** {len(df_final):,}
-                * **Total Valid Inputs:** {st.session_state.total_processed:,}
-                * **Completed by Local Rules:** {st.session_state.locally_completed_count:,}
-                * **First-Pass DNS Checks:** {st.session_state.dns_ping_count:,}
-                * **Clean Deep Scan Candidates:** {deep_candidates:,}
-                * **Recovered by Deep Scan:** {deep_recovered:,}
-
-                **Local Efficiency Rate:** **{efficiency_rate:.1f}%** of this file was handled by local validation before DNS checks.
-                """)
-
-            st.markdown("### 🔍 Data Explorer")
-            filter_choice = st.radio(
-                "Filter Results:",
-                ["All Records", "✅ Domain Verified", "⚠️ Caution / Review", "🚨 Suppress", "🔬 Deep Scan Candidates", "⚪ Empty"],
-                horizontal=True
+        with action_col_a:
+            run_deep_now = st.button(
+                "🔬 Run Deep Scan on Current Results",
+                use_container_width=True,
+                help="Use this if you ran the first pass with deep scan turned off."
             )
 
-            df_display = status_matches_filter(df_final.copy(), filter_choice)
+        with action_col_b:
+            run_api_now = st.button(
+                "🧪 Run Verification API on Current Results",
+                use_container_width=True,
+                help="Requires provider and API key in the sidebar. Only clean deep-scan candidates are sent."
+            )
 
-            display_cols = df_display.columns.tolist()
-            priority_cols = [
-                target_col,
-                "BounceGuard_Status",
-                "BounceGuard_Risk_Level",
-                "BounceGuard_Risk_Score",
-                "BounceGuard_Reason",
-                "BounceGuard_Recommendation",
-                "BounceGuard_Suggested_Fix",
-                "DeepScan_Eligible",
-                "DeepScan_Status",
-                "DeepScan_Reason",
-                "DeepScan_Recommendation",
-                "VerificationAPI_Status",
-                "VerificationAPI_Reason"
-            ]
-
-            ordered_cols = [col for col in priority_cols if col in display_cols]
-            ordered_cols += [col for col in display_cols if col not in ordered_cols]
-
-            st.dataframe(df_display[ordered_cols].head(250), use_container_width=True)
-
-            st.download_button(
-                label="📥 Download Full Validated List (.xlsx)",
-                data=generate_excel(df_final),
-                file_name="BounceGuard_Validated_List.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
+        with action_col_c:
+            clear_results = st.button(
+                "🗑️ Clear Results",
                 use_container_width=True
             )
+
+        if clear_results:
+            st.session_state.df_final = None
+            st.session_state.target_col = None
+            st.rerun()
+
+        if run_deep_now:
+            with st.spinner("Running deep scan on current results..."):
+                # Reset deep scan columns so reruns are clean.
+                df_work = df_final.copy()
+                df_work["DeepScan_Eligible"] = "No"
+                df_work["DeepScan_Status"] = DEEP_NOT_NEEDED
+                df_work["DeepScan_Reason"] = "Deep scan has not been run yet."
+                df_work["DeepScan_Recommendation"] = ""
+                df_work["DeepScan_MX_Resolvers_Found"] = ""
+                df_work["DeepScan_Resolver_Errors"] = ""
+
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                deep_scanner = DeepDomainScanner(max_concurrent=50)
+                df_work = loop.run_until_complete(deep_scanner.process_candidates(df_work, target_col))
+
+                if "VerificationAPI_Status" not in df_work.columns:
+                    df_work["VerificationAPI_Status"] = DEEP_API_SKIPPED
+
+                df_work = add_risk_score_columns(df_work)
+                st.session_state.df_final = df_work
+                df_final = df_work
+
+            st.success("Deep scan complete.")
+
+        if run_api_now:
+            if api_provider_default == "None" or not api_key_default:
+                st.warning("Choose a verification API provider and enter an API key in the sidebar first.")
+            else:
+                with st.spinner(f"Running {api_provider_default} on clean deep-scan candidates..."):
+                    df_work = df_final.copy()
+
+                    # Make sure eligibility exists before sending anything to the API.
+                    if "DeepScan_Eligible" not in df_work.columns or not (df_work["DeepScan_Eligible"] == "Yes").any():
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        deep_scanner = DeepDomainScanner(max_concurrent=50)
+                        df_work = loop.run_until_complete(deep_scanner.process_candidates(df_work, target_col))
+
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    df_work = loop.run_until_complete(
+                        run_verification_api_on_deep_candidates(
+                            df_work,
+                            target_col,
+                            api_provider_default,
+                            api_key_default,
+                            max_concurrent=10
+                        )
+                    )
+
+                    df_work = add_risk_score_columns(df_work)
+                    st.session_state.df_final = df_work
+                    df_final = df_work
+
+                st.success(f"{api_provider_default} verification complete.")
+
+        domain_verified = df_final["BounceGuard_Status"].eq(STATUS_DOMAIN_VERIFIED).sum()
+        caution = df_final["BounceGuard_Status"].isin([STATUS_ROLE_BASED, STATUS_TYPO, STATUS_UNKNOWN]).sum()
+        suppress = df_final["BounceGuard_Status"].isin([STATUS_HIGH_RISK, STATUS_DISPOSABLE, STATUS_NO_MX, STATUS_SANDBOX_INVALID]).sum()
+        empty = df_final["BounceGuard_Status"].eq(STATUS_EMPTY).sum()
+        deep_candidates = (df_final["DeepScan_Eligible"] == "Yes").sum() if "DeepScan_Eligible" in df_final.columns else 0
+        deep_recovered = (df_final["DeepScan_Status"] == DEEP_MX_CONFIRMED).sum() if "DeepScan_Status" in df_final.columns else 0
+
+        st.markdown("### 🏆 Protection Report")
+        col_a, col_b, col_c, col_d, col_e, col_f = st.columns(6)
+        col_a.metric("Emails Processed", f"{st.session_state.total_processed:,}")
+        col_b.metric("✅ Domain Verified", f"{domain_verified:,}")
+        col_c.metric("⚠️ Caution / Review", f"{caution:,}")
+        col_d.metric("🚨 Suppress", f"{suppress:,}", delta="Risk Reduced", delta_color="normal")
+        col_e.metric("🔬 Deep Scan Candidates", f"{deep_candidates:,}")
+        col_f.metric("Recovered by Deep Scan", f"{deep_recovered:,}")
+
+        st.markdown("---")
+
+        with st.expander("⚙️ Stats for Nerds", expanded=False):
+            efficiency_rate = (
+                st.session_state.locally_completed_count / max(len(df_final), 1)
+            ) * 100
+
+            st.markdown(f"""
+            **Network Throughput Analysis**
+
+            * **Total Rows:** {len(df_final):,}
+            * **Total Valid Inputs:** {st.session_state.total_processed:,}
+            * **Completed by Local Rules:** {st.session_state.locally_completed_count:,}
+            * **First-Pass DNS Checks:** {st.session_state.dns_ping_count:,}
+            * **Clean Deep Scan Candidates:** {deep_candidates:,}
+            * **Recovered by Deep Scan:** {deep_recovered:,}
+
+            **Local Efficiency Rate:** **{efficiency_rate:.1f}%** of this file was handled by local validation before DNS checks.
+            """)
+
+        st.markdown("### 🔍 Data Explorer")
+        filter_choice = st.radio(
+            "Filter Results:",
+            ["All Records", "✅ Domain Verified", "⚠️ Caution / Review", "🚨 Suppress", "🔬 Deep Scan Candidates", "⚪ Empty"],
+            horizontal=True
+        )
+
+        df_display = status_matches_filter(df_final.copy(), filter_choice)
+
+        display_cols = df_display.columns.tolist()
+        priority_cols = [
+            target_col,
+            "BounceGuard_Status",
+            "BounceGuard_Risk_Level",
+            "BounceGuard_Risk_Score",
+            "BounceGuard_Reason",
+            "BounceGuard_Recommendation",
+            "BounceGuard_Suggested_Fix",
+            "DeepScan_Eligible",
+            "DeepScan_Status",
+            "DeepScan_Reason",
+            "DeepScan_Recommendation",
+            "VerificationAPI_Status",
+            "VerificationAPI_Reason"
+        ]
+
+        ordered_cols = [col for col in priority_cols if col in display_cols]
+        ordered_cols += [col for col in display_cols if col not in ordered_cols]
+
+        st.dataframe(df_display[ordered_cols].head(250), use_container_width=True)
+
+        st.download_button(
+            label="📥 Download Full Validated List (.xlsx)",
+            data=generate_excel(df_final),
+            file_name="BounceGuard_Validated_List.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True
+        )
 
 
 # ============================================================
