@@ -22,8 +22,10 @@ import re
 import io
 import math
 import os
+import html
+from urllib.parse import urlparse, urljoin
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Set
 
 
 # ============================================================
@@ -82,6 +84,12 @@ DEEP_API_SKIPPED = "Verification API Skipped"
 
 PAID_VERIFICATION_YES = "Yes"
 PAID_VERIFICATION_NO = "No"
+
+ENRICHMENT_NOT_ELIGIBLE = "Not Eligible"
+ENRICHMENT_PENDING = "Pending"
+ENRICHMENT_NO_SUGGESTION = "No Suggestion"
+ENRICHMENT_SUGGESTED = "Suggestion Found"
+ENRICHMENT_ERROR = "Scan Error"
 
 
 # ============================================================
@@ -1091,6 +1099,430 @@ async def run_verification_api_on_deep_candidates(
     return df_result
 
 
+
+# ============================================================
+# ENRICHMENT SCAN
+# ============================================================
+
+def guess_column_index(columns: List[str], possible_names: List[str], fallback: int = 0) -> int:
+    """
+    Best-effort column guesser for user-friendly field mapping.
+    """
+    if not columns:
+        return fallback
+
+    lowered = [str(c).lower() for c in columns]
+    normalized = [re.sub(r"[^a-z0-9]", "", c) for c in lowered]
+
+    for name in possible_names:
+        norm_name = re.sub(r"[^a-z0-9]", "", name.lower())
+        for i, col in enumerate(normalized):
+            if col == norm_name:
+                return i
+
+    for name in possible_names:
+        name_l = name.lower()
+        for i, col in enumerate(lowered):
+            if name_l in col:
+                return i
+
+    return fallback
+
+
+def get_enrichment_candidate_count(
+    df: pd.DataFrame,
+    first_col: str,
+    last_col: str,
+    website_col: str,
+    email_col: str
+) -> int:
+    if df is None or df.empty:
+        return 0
+
+    count = 0
+    for _, row in df.iterrows():
+        eligible, _ = is_enrichment_candidate(row, first_col, last_col, website_col, email_col)
+        if eligible:
+            count += 1
+    return count
+
+
+ROLE_BASED_ENRICHMENT_PREFIXES = GENERIC_EMAIL_PREFIXES
+
+COMMON_CONTACT_PATHS = [
+    "",
+    "/contact",
+    "/contact-us",
+    "/about",
+    "/about-us",
+    "/team",
+    "/staff",
+    "/our-team"
+]
+
+EMAIL_EXTRACT_REGEX = re.compile(
+    r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,63}",
+    re.IGNORECASE
+)
+
+OBFUSCATED_EMAIL_PATTERNS = [
+    (re.compile(r"\s*\[\s*at\s*\]\s*", re.IGNORECASE), "@"),
+    (re.compile(r"\s*\(\s*at\s*\)\s*", re.IGNORECASE), "@"),
+    (re.compile(r"\s+at\s+", re.IGNORECASE), "@"),
+    (re.compile(r"\s*\[\s*dot\s*\]\s*", re.IGNORECASE), "."),
+    (re.compile(r"\s*\(\s*dot\s*\)\s*", re.IGNORECASE), "."),
+    (re.compile(r"\s+dot\s+", re.IGNORECASE), "."),
+]
+
+
+def clean_name_part(value) -> str:
+    if pd.isna(value):
+        return ""
+    clean = str(value).strip().lower()
+    clean = re.sub(r"[^a-z]", "", clean)
+    return clean
+
+
+def normalize_website_to_domain(value) -> str:
+    if pd.isna(value):
+        return ""
+    raw = str(value).strip().lower()
+    if not raw or raw == "nan":
+        return ""
+    raw = raw.strip().replace("mailto:", "")
+    if not raw.startswith(("http://", "https://")):
+        raw = "https://" + raw
+    try:
+        parsed = urlparse(raw)
+        domain = parsed.netloc or parsed.path
+        domain = domain.split("@")[-1]
+        domain = domain.split(":")[0]
+        domain = domain.strip().strip("/")
+        if domain.startswith("www."):
+            domain = domain[4:]
+        return domain
+    except Exception:
+        return ""
+
+
+def normalize_website_to_base_url(value) -> str:
+    domain = normalize_website_to_domain(value)
+    if not domain:
+        return ""
+    return f"https://{domain}"
+
+
+def deobfuscate_email_text(text: str) -> str:
+    if not text:
+        return ""
+    decoded = html.unescape(text)
+    for pattern, replacement in OBFUSCATED_EMAIL_PATTERNS:
+        decoded = pattern.sub(replacement, decoded)
+    return decoded
+
+
+def extract_emails_from_text(text: str) -> List[str]:
+    if not text:
+        return []
+    decoded = deobfuscate_email_text(text)
+    found = set()
+    for match in EMAIL_EXTRACT_REGEX.findall(decoded):
+        clean = normalize_email(match)
+        if clean and EMAIL_REGEX.match(clean):
+            found.add(clean)
+    for match in re.findall(r"mailto:([^\"'\s<>?]+)", decoded, flags=re.IGNORECASE):
+        clean = normalize_email(match)
+        if clean and EMAIL_REGEX.match(clean):
+            found.add(clean)
+    return sorted(found)
+
+
+def is_same_or_related_domain(email_domain: str, website_domain: str) -> bool:
+    if not email_domain or not website_domain:
+        return False
+    email_domain = email_domain.lower().strip()
+    website_domain = website_domain.lower().strip()
+    if email_domain == website_domain:
+        return True
+    return email_domain.endswith("." + website_domain) or website_domain.endswith("." + email_domain)
+
+
+def classify_found_email(email_addr: str, first_name: str, last_name: str, website_domain: str) -> Tuple[int, str, str]:
+    local, domain = split_email(email_addr)
+    first = clean_name_part(first_name)
+    last = clean_name_part(last_name)
+    same_domain = is_same_or_related_domain(domain, website_domain)
+    role_based = local in ROLE_BASED_ENRICHMENT_PREFIXES
+    score = 0
+    evidence_parts = []
+    if same_domain:
+        score += 30
+        evidence_parts.append("same domain")
+    if role_based:
+        score -= 20
+        evidence_parts.append("role-based address")
+    if first and last:
+        possible_person_patterns = {
+            first,
+            last,
+            f"{first}.{last}",
+            f"{first}{last}",
+            f"{first}_{last}",
+            f"{first[0]}{last}" if first else "",
+            f"{first}{last[0]}" if last else "",
+        }
+        if local in possible_person_patterns:
+            score += 60
+            evidence_parts.append("matches first/last pattern")
+        elif first in local or last in local:
+            score += 30
+            evidence_parts.append("contains first or last name")
+    if not role_based and same_domain:
+        score += 10
+        evidence_parts.append("person-specific looking address")
+    if score >= 80:
+        confidence = "High"
+    elif score >= 45:
+        confidence = "Medium"
+    else:
+        confidence = "Low"
+    evidence = ", ".join(evidence_parts) if evidence_parts else "public website email found"
+    return score, confidence, evidence
+
+
+async def fetch_page_text(session: aiohttp.ClientSession, url: str) -> Tuple[str, str]:
+    try:
+        headers = {"User-Agent": "BounceGuard/1.0 Email Enrichment Scanner"}
+        async with session.get(url, headers=headers, timeout=12, allow_redirects=True) as response:
+            content_type = response.headers.get("content-type", "").lower()
+            if response.status >= 400:
+                return "", f"HTTP {response.status}"
+            if "text/html" not in content_type and "text/plain" not in content_type and content_type:
+                return "", f"Skipped non-text content: {content_type}"
+            text = await response.text(errors="ignore")
+            return text[:750000], ""
+    except Exception as exc:
+        return "", str(exc)
+
+
+async def scrape_website_for_emails(website_value, max_pages: int = 5) -> Tuple[List[Tuple[str, str]], str]:
+    base_url = normalize_website_to_base_url(website_value)
+    if not base_url:
+        return [], "No usable website/domain."
+    urls = [urljoin(base_url, path) for path in COMMON_CONTACT_PATHS[:max_pages]]
+    found = {}
+    notes = []
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_page_text(session, url) for url in urls]
+        results = await asyncio.gather(*tasks)
+        for url, (text, error) in zip(urls, results):
+            if error:
+                notes.append(f"{url}: {error}")
+                continue
+            for email_addr in extract_emails_from_text(text):
+                found.setdefault(email_addr, url)
+    return sorted(found.items()), "; ".join(notes[:3])
+
+
+def infer_email_pattern_for_domain(df: pd.DataFrame, first_col: str, last_col: str, email_col: str, domain: str) -> Tuple[str, int, str]:
+    if df is None or df.empty or not domain or not first_col or not last_col or not email_col:
+        return "", 0, "No usable reference data available."
+    pattern_counts: Dict[str, int] = {}
+    for _, row in df.iterrows():
+        first = clean_name_part(row.get(first_col, ""))
+        last = clean_name_part(row.get(last_col, ""))
+        email_addr = normalize_email(row.get(email_col, ""))
+        if not first or not last or not email_addr or not EMAIL_REGEX.match(email_addr):
+            continue
+        local, email_domain = split_email(email_addr)
+        if email_domain != domain:
+            continue
+        status = str(row.get("BounceGuard_Status", ""))
+        if status not in [STATUS_DOMAIN_VERIFIED, STATUS_ROLE_BASED, ""]:
+            continue
+        if local in GENERIC_EMAIL_PREFIXES:
+            continue
+        candidates = {
+            "first.last": f"{first}.{last}",
+            "firstlast": f"{first}{last}",
+            "first_last": f"{first}_{last}",
+            "flast": f"{first[0]}{last}" if first else "",
+            "firstl": f"{first}{last[0]}" if last else "",
+            "first": first,
+        }
+        for pattern_name, expected_local in candidates.items():
+            if expected_local and local == expected_local:
+                pattern_counts[pattern_name] = pattern_counts.get(pattern_name, 0) + 1
+    if not pattern_counts:
+        return "", 0, "No matching person-specific pattern found in uploaded data."
+    pattern_name, count = max(pattern_counts.items(), key=lambda item: item[1])
+    return pattern_name, count, f"Pattern '{pattern_name}' found {count} time(s) for this domain."
+
+
+def build_email_from_pattern(first_name, last_name, domain: str, pattern_name: str) -> str:
+    first = clean_name_part(first_name)
+    last = clean_name_part(last_name)
+    if not first or not last or not domain or not pattern_name:
+        return ""
+    local_map = {
+        "first.last": f"{first}.{last}",
+        "firstlast": f"{first}{last}",
+        "first_last": f"{first}_{last}",
+        "flast": f"{first[0]}{last}",
+        "firstl": f"{first}{last[0]}",
+        "first": first,
+    }
+    local = local_map.get(pattern_name, "")
+    return f"{local}@{domain}" if local else ""
+
+
+def validate_suggested_email_basic(email_addr: str) -> str:
+    if not email_addr:
+        return "Not checked"
+    result = format_and_trap_email(email_addr)
+    if result.status == STATUS_PENDING:
+        return "Syntax OK, domain check needed"
+    return result.status
+
+
+def is_enrichment_candidate(row: pd.Series, first_col: str, last_col: str, website_col: str, email_col: str) -> Tuple[bool, str]:
+    first = str(row.get(first_col, "")).strip() if first_col else ""
+    last = str(row.get(last_col, "")).strip() if last_col else ""
+    website = str(row.get(website_col, "")).strip() if website_col else ""
+    email_addr = normalize_email(row.get(email_col, "")) if email_col else ""
+    if not first or not last:
+        return False, "Missing first or last name."
+    if not website or not normalize_website_to_domain(website):
+        return False, "Missing usable website/domain."
+    if email_addr:
+        return False, "Email already exists. Enrichment only runs on blank email records."
+    return True, "Eligible for enrichment."
+
+
+async def enrich_single_record(first_name: str, last_name: str, website: str, reference_df: Optional[pd.DataFrame] = None, first_col: str = "", last_col: str = "", email_col: str = "", scrape_website: bool = True) -> Dict[str, str]:
+    domain = normalize_website_to_domain(website)
+    output = {
+        "Suggested_Email": "",
+        "Suggested_Email_Confidence": "",
+        "Suggested_Email_Source": "",
+        "Suggested_Email_Evidence": "",
+        "Suggested_Email_URL": "",
+        "Suggested_Email_Format_Pattern": "",
+        "Suggested_Email_Verification_Status": "Not checked",
+        "Enrichment_Status": ENRICHMENT_NO_SUGGESTION,
+        "Enrichment_Recommendation": "No suggested email was found. Do not invent one manually without verification.",
+        "Found_Website_Emails": "",
+    }
+    if not clean_name_part(first_name) or not clean_name_part(last_name) or not domain:
+        output["Enrichment_Status"] = ENRICHMENT_NOT_ELIGIBLE
+        output["Enrichment_Recommendation"] = "First name, last name, and website/domain are required."
+        return output
+    if scrape_website:
+        found_email_rows, scrape_notes = await scrape_website_for_emails(website, max_pages=5)
+        output["Found_Website_Emails"] = ", ".join([email for email, _ in found_email_rows[:10]])
+        best_found = None
+        best_score = -999
+        best_confidence = ""
+        best_evidence = ""
+        best_url = ""
+        for email_addr, source_url in found_email_rows:
+            local, email_domain = split_email(email_addr)
+            if not is_same_or_related_domain(email_domain, domain):
+                continue
+            score, confidence, evidence = classify_found_email(email_addr, first_name, last_name, domain)
+            if score > best_score:
+                best_found = email_addr
+                best_score = score
+                best_confidence = confidence
+                best_evidence = evidence
+                best_url = source_url
+        if best_found:
+            output["Suggested_Email"] = best_found
+            output["Suggested_Email_Confidence"] = best_confidence
+            output["Suggested_Email_Source"] = "Website scrape"
+            output["Suggested_Email_Evidence"] = f"Found on public website: {best_evidence}"
+            output["Suggested_Email_URL"] = best_url
+            output["Suggested_Email_Verification_Status"] = validate_suggested_email_basic(best_found)
+            output["Enrichment_Status"] = ENRICHMENT_SUGGESTED
+            output["Enrichment_Recommendation"] = "Review before use. This was found or inferred from public website content, not guaranteed."
+            return output
+    pattern_name, pattern_count, pattern_evidence = infer_email_pattern_for_domain(
+        reference_df if reference_df is not None else pd.DataFrame(), first_col, last_col, email_col, domain
+    )
+    if pattern_name and pattern_count >= 2:
+        suggested = build_email_from_pattern(first_name, last_name, domain, pattern_name)
+        output["Suggested_Email"] = suggested
+        output["Suggested_Email_Confidence"] = "High" if pattern_count >= 5 else "Medium"
+        output["Suggested_Email_Source"] = "Pattern inference"
+        output["Suggested_Email_Evidence"] = pattern_evidence
+        output["Suggested_Email_Format_Pattern"] = pattern_name
+        output["Suggested_Email_Verification_Status"] = validate_suggested_email_basic(suggested)
+        output["Enrichment_Status"] = ENRICHMENT_SUGGESTED
+        output["Enrichment_Recommendation"] = "Review and verify before use. This is inferred from patterns in the uploaded file."
+        return output
+    if pattern_name and pattern_count == 1:
+        suggested = build_email_from_pattern(first_name, last_name, domain, pattern_name)
+        output["Suggested_Email"] = suggested
+        output["Suggested_Email_Confidence"] = "Low"
+        output["Suggested_Email_Source"] = "Weak pattern inference"
+        output["Suggested_Email_Evidence"] = pattern_evidence
+        output["Suggested_Email_Format_Pattern"] = pattern_name
+        output["Suggested_Email_Verification_Status"] = validate_suggested_email_basic(suggested)
+        output["Enrichment_Status"] = ENRICHMENT_SUGGESTED
+        output["Enrichment_Recommendation"] = "Low-confidence suggestion. Verify before use."
+        return output
+    return output
+
+
+async def enrich_dataframe(df: pd.DataFrame, first_col: str, last_col: str, website_col: str, email_col: str, scrape_website: bool = True, max_concurrent: int = 12) -> pd.DataFrame:
+    df_result = df.copy()
+    enrichment_cols = [
+        "Enrichment_Eligible", "Enrichment_Status", "Enrichment_Reason", "Suggested_Email", "Suggested_Email_Confidence", "Suggested_Email_Source", "Suggested_Email_Evidence", "Suggested_Email_URL", "Suggested_Email_Format_Pattern", "Suggested_Email_Verification_Status", "Enrichment_Recommendation", "Found_Website_Emails"
+    ]
+    for col in enrichment_cols:
+        if col not in df_result.columns:
+            df_result[col] = ""
+    candidates = []
+    for idx, row in df_result.iterrows():
+        eligible, reason = is_enrichment_candidate(row, first_col, last_col, website_col, email_col)
+        df_result.at[idx, "Enrichment_Eligible"] = "Yes" if eligible else "No"
+        df_result.at[idx, "Enrichment_Reason"] = reason
+        if eligible:
+            candidates.append(idx)
+            df_result.at[idx, "Enrichment_Status"] = ENRICHMENT_PENDING
+        else:
+            df_result.at[idx, "Enrichment_Status"] = ENRICHMENT_NOT_ELIGIBLE
+    semaphore = asyncio.Semaphore(max_concurrent)
+    async def run_one(idx: int):
+        async with semaphore:
+            row = df_result.loc[idx]
+            try:
+                result = await enrich_single_record(row.get(first_col, ""), row.get(last_col, ""), row.get(website_col, ""), df_result, first_col, last_col, email_col, scrape_website)
+                return idx, result
+            except Exception as exc:
+                return idx, {"Enrichment_Status": ENRICHMENT_ERROR, "Enrichment_Recommendation": "Review manually. Enrichment failed for this record.", "Suggested_Email_Evidence": str(exc)}
+    if candidates:
+        results = await asyncio.gather(*[run_one(idx) for idx in candidates])
+        for idx, result in results:
+            for key, value in result.items():
+                if key in df_result.columns:
+                    df_result.at[idx, key] = value
+    return df_result
+
+
+def enrichment_matches_filter(df: pd.DataFrame, filter_choice: str) -> pd.DataFrame:
+    if filter_choice == "All Records":
+        return df
+    if filter_choice == "Eligible Only":
+        return df[df.get("Enrichment_Eligible", "").eq("Yes")]
+    if filter_choice == "Suggestions Found":
+        return df[df.get("Enrichment_Status", "").eq(ENRICHMENT_SUGGESTED)]
+    if filter_choice == "High / Medium Confidence":
+        return df[df.get("Suggested_Email_Confidence", "").isin(["High", "Medium"])]
+    if filter_choice == "No Suggestion":
+        return df[df.get("Enrichment_Status", "").eq(ENRICHMENT_NO_SUGGESTION)]
+    return df
+
 # ============================================================
 # RISK SCORING
 # ============================================================
@@ -1300,9 +1732,10 @@ st.sidebar.caption(
 # TABS
 # ============================================================
 
-tab_single, tab_bulk, tab_about = st.tabs([
+tab_single, tab_bulk, tab_enrichment, tab_about = st.tabs([
     "🎯 Quick Check",
     "📁 Bulk List Scrubber",
+    "✨ Enrichment Scan",
     "ℹ️ About"
 ])
 
@@ -1654,6 +2087,70 @@ with tab_bulk:
             **Local Efficiency Rate:** **{efficiency_rate:.1f}%** of this file was handled by local validation before DNS checks.
             """)
 
+        st.markdown("### ✨ Enrichment Candidates")
+        st.caption(
+            "Enrichment is separate from validation. It only scans rows where First Name, Last Name, and Website are present, and the Email field is blank."
+        )
+
+        bulk_columns = list(df_final.columns)
+        default_first_idx = guess_column_index(bulk_columns, ["FirstName", "First Name", "firstname", "first"], 0)
+        default_last_idx = guess_column_index(bulk_columns, ["LastName", "Last Name", "lastname", "last"], 0)
+        default_website_idx = guess_column_index(bulk_columns, ["Website", "Web Site", "url", "domain"], 0)
+        default_email_idx = bulk_columns.index(target_col) if target_col in bulk_columns else guess_column_index(bulk_columns, ["Email", "email"], 0)
+
+        with st.expander("Run enrichment on records missing email", expanded=False):
+            st.warning(
+                "Enrichment suggestions are inferred or found from public website content. They are not automatically correct and should not overwrite CRM email fields without review."
+            )
+
+            e_col_a, e_col_b, e_col_c, e_col_d = st.columns(4)
+            with e_col_a:
+                quick_first_col = st.selectbox("First Name", options=bulk_columns, index=default_first_idx, key="quick_enrich_first_col")
+            with e_col_b:
+                quick_last_col = st.selectbox("Last Name", options=bulk_columns, index=default_last_idx, key="quick_enrich_last_col")
+            with e_col_c:
+                quick_website_col = st.selectbox("Website", options=bulk_columns, index=default_website_idx, key="quick_enrich_website_col")
+            with e_col_d:
+                quick_email_col = st.selectbox("Email", options=bulk_columns, index=default_email_idx, key="quick_enrich_email_col")
+
+            quick_candidate_count = get_enrichment_candidate_count(df_final, quick_first_col, quick_last_col, quick_website_col, quick_email_col)
+            st.metric("Rows eligible for enrichment", f"{quick_candidate_count:,}")
+
+            quick_scrape = st.checkbox(
+                "Search public website pages",
+                value=True,
+                key="quick_enrich_scrape",
+                help="Checks homepage, contact, about, team, and staff pages for public emails."
+            )
+
+            if st.button("✨ Run Enrichment on Eligible Blank-Email Records", use_container_width=True, key="quick_run_enrichment"):
+                if quick_candidate_count == 0:
+                    st.warning("No rows are eligible based on the selected column mapping.")
+                else:
+                    with st.spinner(f"Running enrichment on {quick_candidate_count:,} eligible records..."):
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        df_work = loop.run_until_complete(
+                            enrich_dataframe(
+                                df_final,
+                                first_col=quick_first_col,
+                                last_col=quick_last_col,
+                                website_col=quick_website_col,
+                                email_col=quick_email_col,
+                                scrape_website=quick_scrape,
+                                max_concurrent=12
+                            )
+                        )
+                        st.session_state.df_final = df_work
+                        df_final = df_work
+
+                    st.success("Enrichment complete. Suggested emails were added as separate suggestion columns.")
+
+        if "Enrichment_Status" in df_final.columns:
+            enrich_suggestions = (df_final["Enrichment_Status"] == ENRICHMENT_SUGGESTED).sum()
+            enrich_high_medium = df_final["Suggested_Email_Confidence"].isin(["High", "Medium"]).sum()
+            st.caption(f"Current enrichment results: {enrich_suggestions:,} suggestions found, including {enrich_high_medium:,} high/medium confidence suggestions.")
+
         st.markdown("### 🔍 Data Explorer")
         filter_choice = st.radio(
             "Filter Results:",
@@ -1697,8 +2194,179 @@ with tab_bulk:
         )
 
 
+
 # ============================================================
-# TAB 3: SIMPLE CUSTOMER-FACING ABOUT
+# TAB 3: ENRICHMENT SCAN
+# ============================================================
+
+with tab_enrichment:
+    st.markdown("### Enrichment Scan")
+    st.markdown(
+        "Use this for records that have **First Name**, **Last Name**, and **Website**, but **no email address**. "
+        "For bulk mode, run the Bulk List Scrubber first, then run Enrichment Scan against the processed results. "
+        "BounceGuard will look for public website emails and infer possible email formats from your uploaded data."
+    )
+    st.warning(
+        "Important: Enrichment results are suggestions, not truth. A suggested email may be scraped from public website content "
+        "or inferred from a pattern. Do not automatically overwrite CRM email fields or send campaigns to suggested emails without review."
+    )
+
+    one_off_tab, bulk_enrich_tab = st.tabs(["One-Off Enrichment", "Bulk Enrichment"])
+
+    with one_off_tab:
+        st.markdown("#### One-Off Contact Check")
+        st.caption(
+            "Enter an existing email to validate it, or leave email blank and enter first name, last name, and website to search for a suggested email."
+        )
+
+        one_col_a, one_col_b, one_col_c, one_col_d = st.columns(4)
+        with one_col_a:
+            one_first = st.text_input("First Name", key="enrich_one_first")
+        with one_col_b:
+            one_last = st.text_input("Last Name", key="enrich_one_last")
+        with one_col_c:
+            one_website = st.text_input("Website", placeholder="example.com", key="enrich_one_website")
+        with one_col_d:
+            one_email = st.text_input("Existing Email Optional", placeholder="name@example.com", key="enrich_one_email")
+
+        scrape_one = st.checkbox(
+            "Search public website pages",
+            value=True,
+            key="enrich_one_scrape",
+            help="Checks homepage, contact, about, team, and staff pages for public email addresses."
+        )
+
+        st.info(
+            "If Existing Email is filled in, BounceGuard validates that email. If Existing Email is blank, BounceGuard attempts enrichment using first name, last name, and website."
+        )
+
+        if st.button("✨ Run One-Off Check", type="primary", key="run_one_enrichment"):
+            if one_email:
+                with st.spinner("Validating existing email..."):
+                    local_result = format_and_trap_email(one_email)
+                    final_result = local_result
+
+                    if local_result.status in [STATUS_PENDING, STATUS_ROLE_BASED]:
+                        _, domain = split_email(local_result.clean_email)
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        validator = EmailDomainValidator()
+                        dns_result = loop.run_until_complete(validator.check_single(domain))
+
+                        if local_result.status == STATUS_ROLE_BASED and dns_result.status == STATUS_DOMAIN_VERIFIED:
+                            final_result = ValidationResult(
+                                clean_email=local_result.clean_email,
+                                status=STATUS_ROLE_BASED,
+                                reason="The domain is configured to receive email, but the address is role-based.",
+                                recommendation="Use with caution. Prefer a person-specific address for marketing."
+                            )
+                        else:
+                            final_result = ValidationResult(
+                                clean_email=local_result.clean_email,
+                                status=dns_result.status,
+                                reason=dns_result.reason,
+                                recommendation=dns_result.recommendation
+                            )
+
+                render_single_result(final_result)
+
+            else:
+                if not one_first or not one_last or not one_website:
+                    st.warning("First name, last name, and website are required when the email is blank.")
+                else:
+                    with st.spinner("Running one-off enrichment scan..."):
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        result = loop.run_until_complete(
+                            enrich_single_record(
+                                first_name=one_first,
+                                last_name=one_last,
+                                website=one_website,
+                                reference_df=st.session_state.df_final if st.session_state.df_final is not None else pd.DataFrame(),
+                                first_col="",
+                                last_col="",
+                                email_col="",
+                                scrape_website=scrape_one
+                            )
+                        )
+
+                    result_df = pd.DataFrame([result])
+                    st.dataframe(result_df, use_container_width=True)
+
+                    if result.get("Suggested_Email"):
+                        st.warning("This is a suggestion, not a confirmed CRM email. Review it and validate it before use.")
+                    else:
+                        st.info("No suggested email was found from the available public website/pattern checks.")
+
+    with bulk_enrich_tab:
+        st.markdown("#### Bulk Enrichment from Current Results")
+        if st.session_state.df_final is None or not st.session_state.target_col:
+            st.info("Run the Bulk List Scrubber first. Bulk enrichment uses the processed result set and only scans records with blank emails.")
+        else:
+            df_enrich_source = st.session_state.df_final
+            columns = list(df_enrich_source.columns)
+            st.markdown("Map the minimum fields for enrichment. Bulk enrichment only processes rows where the email field is blank.")
+            def guess_column(possible_names: List[str], fallback: int = 0) -> int:
+                lowered = [c.lower() for c in columns]
+                for name in possible_names:
+                    for i, col in enumerate(lowered):
+                        if name in col:
+                            return i
+                return fallback
+            map_col_a, map_col_b, map_col_c, map_col_d = st.columns(4)
+            with map_col_a:
+                first_col = st.selectbox("First Name Column", options=columns, index=guess_column_index(columns, ["FirstName", "First Name", "firstname", "first"], 0), key="enrich_first_col")
+            with map_col_b:
+                last_col = st.selectbox("Last Name Column", options=columns, index=guess_column_index(columns, ["LastName", "Last Name", "lastname", "last"], 0), key="enrich_last_col")
+            with map_col_c:
+                website_col = st.selectbox("Website Column", options=columns, index=guess_column_index(columns, ["Website", "Web Site", "url", "domain"], 0), key="enrich_website_col")
+            with map_col_d:
+                email_col_for_enrich = st.selectbox("Email Column", options=columns, index=columns.index(st.session_state.target_col) if st.session_state.target_col in columns else guess_column_index(columns, ["Email", "email"], 0), key="enrich_email_col")
+            scrape_bulk = st.checkbox("Search public website pages during bulk enrichment", value=True, key="enrich_bulk_scrape")
+            preview_flags = []
+            for _, row in df_enrich_source.iterrows():
+                eligible, _ = is_enrichment_candidate(row, first_col, last_col, website_col, email_col_for_enrich)
+                preview_flags.append("Yes" if eligible else "No")
+            eligible_count = preview_flags.count("Yes")
+            st.metric("Enrichment Candidates", f"{eligible_count:,}")
+            st.caption("A record is eligible only when First Name, Last Name, and Website are present and the Email field is blank.")
+            if st.button("✨ Run Bulk Enrichment on Eligible Records", type="primary", use_container_width=True):
+                if eligible_count == 0:
+                    st.warning("No records are eligible for enrichment with the current column mapping.")
+                else:
+                    with st.spinner(f"Running enrichment scan on {eligible_count:,} eligible records..."):
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        df_enriched = loop.run_until_complete(enrich_dataframe(df_enrich_source, first_col, last_col, website_col, email_col_for_enrich, scrape_bulk, max_concurrent=12))
+                        st.session_state.df_final = df_enriched
+                        df_enrich_source = df_enriched
+                    st.success("Bulk enrichment complete.")
+            if "Enrichment_Status" in df_enrich_source.columns:
+                suggested_count = (df_enrich_source["Enrichment_Status"] == ENRICHMENT_SUGGESTED).sum()
+                high_medium = df_enrich_source["Suggested_Email_Confidence"].isin(["High", "Medium"]).sum()
+                no_suggestion = (df_enrich_source["Enrichment_Status"] == ENRICHMENT_NO_SUGGESTION).sum()
+                metric_a, metric_b, metric_c, metric_d = st.columns(4)
+                metric_a.metric("Eligible", f"{(df_enrich_source['Enrichment_Eligible'] == 'Yes').sum():,}")
+                metric_b.metric("Suggestions Found", f"{suggested_count:,}")
+                metric_c.metric("High / Medium Confidence", f"{high_medium:,}")
+                metric_d.metric("No Suggestion", f"{no_suggestion:,}")
+                filter_choice = st.radio("Filter Enrichment Results:", ["All Records", "Eligible Only", "Suggestions Found", "High / Medium Confidence", "No Suggestion"], horizontal=True, key="enrichment_filter")
+                df_enrich_display = enrichment_matches_filter(df_enrich_source.copy(), filter_choice)
+                priority_cols = [first_col, last_col, website_col, email_col_for_enrich, "Enrichment_Eligible", "Enrichment_Status", "Enrichment_Reason", "Suggested_Email", "Suggested_Email_Confidence", "Suggested_Email_Source", "Suggested_Email_Evidence", "Suggested_Email_URL", "Suggested_Email_Format_Pattern", "Suggested_Email_Verification_Status", "Enrichment_Recommendation", "Found_Website_Emails"]
+                display_cols = df_enrich_display.columns.tolist()
+                ordered_cols = []
+                for col in priority_cols:
+                    if col in display_cols and col not in ordered_cols:
+                        ordered_cols.append(col)
+                ordered_cols += [col for col in display_cols if col not in ordered_cols]
+                st.dataframe(df_enrich_display[ordered_cols].head(250), use_container_width=True)
+                st.download_button(label="📥 Download Enriched Results (.xlsx)", data=generate_excel(df_enrich_source), file_name="BounceGuard_Enriched_List.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
+            else:
+                st.info("Bulk enrichment has not been run yet.")
+
+
+# ============================================================
+# TAB 4: SIMPLE CUSTOMER-FACING ABOUT
 # ============================================================
 
 with tab_about:
@@ -1718,14 +2386,19 @@ with tab_about:
     * Disposable or temporary email domains
     * Domains that do not appear configured to receive email
     * Questionable domains that deserve a deeper second pass
+    * Missing-email records that may qualify for enrichment suggestions
 
     **Deep Scan**
 
     Deep Scan is BounceGuard's free second-pass check. It asks multiple DNS providers whether a questionable domain can receive email. It skips obvious junk, Salesforce sandbox emails, role-based addresses, and typo domains.
 
+    **Enrichment Scan**
+
+    Enrichment Scan is separate from validation. It only works on records with first name, last name, and website, but no email address. Suggestions may be found on public website pages or inferred from email patterns in the uploaded file. Suggested emails should be reviewed before use.
+
     **Third-Party Verification**
 
-    ZeroBounce or NeverBounce is separate from Deep Scan. These paid services should only be used on the small group of clean records that remain unresolved after BounceGuard's free checks.
+    ZeroBounce or NeverBounce is separate from Deep Scan and Enrichment Scan. These paid services should only be used on the small group of clean records that remain unresolved after BounceGuard's free checks or suggested emails that need stronger confirmation.
 
     **Important**
 
