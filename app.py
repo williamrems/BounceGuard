@@ -2342,6 +2342,7 @@ with tab_paste:
 
     with st.expander("Recommended Salesforce Inspector SOQL", expanded=True):
         st.caption("Use active, unconverted Leads for the normal BounceGuard hygiene pass. Include blank emails if you want BounceGuard to classify them as No Email.")
+        st.markdown("**Normal Lead hygiene pass**")
         st.code(
             """SELECT Id, FirstName, LastName, Name, Email
 FROM Lead
@@ -2349,6 +2350,17 @@ WHERE IsConverted = false
 LIMIT 5000""",
             language="sql"
         )
+
+        st.caption("Use this when reps have fixed emails and the records are waiting to be rechecked.")
+        st.markdown("**Needs Recheck queue**")
+        st.code(
+            """SELECT Id, FirstName, LastName, Name, Email
+FROM Lead
+WHERE BounceGuard_Needs_Recheck__c = true
+LIMIT 5000""",
+            language="sql"
+        )
+
         st.caption("If you only want to validate records that already have an email, add: AND Email != null")
 
     if "paste_input_reset_counter" not in st.session_state:
