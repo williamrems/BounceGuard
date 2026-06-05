@@ -1478,9 +1478,9 @@ def add_clean_bounceguard_output_columns(df: pd.DataFrame, source_label: str = "
     df_result["BounceGuard_Source"] = source_label
 
     if "PaidVerification_Eligible" in df_result.columns:
-        df_result["BounceGuard_Paid_Verification_Recommended"] = df_result["PaidVerification_Eligible"].eq(PAID_VERIFICATION_YES)
+        df_result["BounceGuard_Verify_Recommended"] = df_result["PaidVerification_Eligible"].eq(PAID_VERIFICATION_YES)
     else:
-        df_result["BounceGuard_Paid_Verification_Recommended"] = False
+        df_result["BounceGuard_Verify_Recommended"] = False
 
     if "DeepScan_Status" in df_result.columns:
         df_result["BounceGuard_Deep_Scan_Status"] = df_result["DeepScan_Status"].apply(normalize_deep_scan_status)
@@ -1493,7 +1493,7 @@ def add_clean_bounceguard_output_columns(df: pd.DataFrame, source_label: str = "
     df_result["BounceGuard_Detail__c"] = df_result["BounceGuard_Detail"].astype(str).str.slice(0, 32000)
     df_result["BounceGuard_Last_Checked__c"] = df_result["BounceGuard_Last_Checked"]
     df_result["BounceGuard_Source__c"] = df_result["BounceGuard_Source"]
-    df_result["BounceGuard_Paid_Verification_Recommended__c"] = df_result["BounceGuard_Paid_Verification_Recommended"]
+    df_result["BounceGuard_Verify_Recommended__c"] = df_result["BounceGuard_Verify_Recommended"]
     df_result["BounceGuard_Deep_Scan_Status__c"] = df_result["BounceGuard_Deep_Scan_Status"]
 
     return df_result
@@ -1515,7 +1515,7 @@ def get_full_report_columns(df: pd.DataFrame) -> list:
         "BounceGuard_Detail",
         "BounceGuard_Last_Checked",
         "BounceGuard_Source",
-        "BounceGuard_Paid_Verification_Recommended",
+        "BounceGuard_Verify_Recommended",
         "BounceGuard_Deep_Scan_Status",
     ]
 
@@ -1570,7 +1570,7 @@ def get_salesforce_update_payload_columns(df: pd.DataFrame) -> list:
         "BounceGuard_Detail__c",
         "BounceGuard_Last_Checked__c",
         "BounceGuard_Source__c",
-        "BounceGuard_Paid_Verification_Recommended__c",
+        "BounceGuard_Verify_Recommended__c",
         "BounceGuard_Deep_Scan_Status__c",
     ]
 
@@ -1751,7 +1751,7 @@ def safe_dataframe_for_display(df: pd.DataFrame) -> pd.DataFrame:
     mixed_type_cols = [
         "DeepScan_MX_Resolvers_Found",
         "DeepScan_Resolver_Errors",
-        "BounceGuard_Paid_Verification_Eligible__c",
+        "BounceGuard_Verify_Recommended__c",
     ]
 
     for col in mixed_type_cols:
@@ -2291,7 +2291,7 @@ with tab_bulk:
             "BounceGuard_Status_Display",
             "BounceGuard_Detail",
             "BounceGuard_Deep_Scan_Status",
-            "BounceGuard_Paid_Verification_Recommended",
+            "BounceGuard_Verify_Recommended",
             "DeepScan_Eligible",
             "DeepScan_Status",
             "DeepScan_Reason",
@@ -2645,7 +2645,7 @@ with tab_paste:
             "BounceGuard_Status_Display",
             "BounceGuard_Detail",
             "BounceGuard_Deep_Scan_Status",
-            "BounceGuard_Paid_Verification_Recommended",
+            "BounceGuard_Verify_Recommended",
             "DeepScan_Eligible",
             "DeepScan_Status",
             "DeepScan_Reason",
