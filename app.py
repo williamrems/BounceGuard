@@ -35,7 +35,8 @@ from typing import Dict, Optional, Tuple, List
 st.set_page_config(
     page_title="BounceGuard | ContractorFlow",
     page_icon="🛡️",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
 
 
@@ -1551,10 +1552,10 @@ with st.sidebar.expander("Optional third-party verification API", expanded=False
 # TABS
 # ============================================================
 
-tab_single, tab_bulk, tab_paste, tab_about = st.tabs([
+tab_single, tab_paste, tab_bulk, tab_about = st.tabs([
     "🎯 Quick Check",
-    "📁 Bulk List Scrubber",
-    "📋 Paste Table",
+    "📋 Paste Salesforce / Sheet Data",
+    "📁 Upload CSV / Excel File",
     "ℹ️ About"
 ])
 
@@ -1640,12 +1641,12 @@ with tab_single:
 
 
 # ============================================================
-# TAB 2: BULK LIST SCRUBBER
+# TAB 3: UPLOAD CSV / EXCEL FILE
 # ============================================================
 
 with tab_bulk:
-    st.markdown("### Bulk List Scrubber")
-    st.markdown("Upload your contact list to reduce obvious bounce and deliverability risk before a campaign.")
+    st.markdown("### Upload CSV / Excel File")
+    st.markdown("Use this when you have a saved CSV or Excel file. Upload the file, choose the email column, then run BounceGuard.")
 
     uploaded_file = st.file_uploader("Upload Data (.csv or .xlsx)", type=["csv", "xlsx"])
 
@@ -1957,14 +1958,14 @@ with tab_bulk:
 
 
 # ============================================================
-# TAB 3: PASTE TABLE
+# TAB 2: PASTE SALESFORCE / SHEET DATA
 # ============================================================
 
 with tab_paste:
-    st.markdown("### Paste Table Scrubber")
+    st.markdown("### Paste Salesforce / Sheet Data")
     st.markdown(
-        "Use this when you copy results from **Salesforce Inspector**, Excel, or Google Sheets. "
-        "For Salesforce Inspector, use **Copy (Excel)**, paste the results below, then run BounceGuard."
+        "Use this when you copy rows from **Salesforce Inspector**, Excel, or Google Sheets. "
+        "For Salesforce Inspector, use **Copy (Excel)**, paste the data below, then run BounceGuard."
     )
 
     st.info(
@@ -2291,11 +2292,14 @@ with tab_about:
     * Disposable or temporary email domains
     * Domains that do not appear configured to receive email
     * Questionable domains that deserve a deeper second pass
-    * Salesforce Inspector, Excel, and Google Sheets pasted table input
+    * Pasted table input from Salesforce Inspector, Excel, or Google Sheets
+    * CSV and Excel file uploads
 
-    **Paste Table**
+    **Two Bulk Input Options**
 
-    Use the Paste Table tab when copying rows from Salesforce Inspector, Excel, or Google Sheets. Salesforce Inspector's Copy (Excel) output can be pasted directly into BounceGuard, processed, and copied back out as Google Sheets TSV or a Salesforce update-review payload.
+    Use **Paste Salesforce / Sheet Data** when copying rows from Salesforce Inspector, Excel, or Google Sheets. Salesforce Inspector's Copy (Excel) output can be pasted directly into BounceGuard, processed, and copied back out as Google Sheets TSV or a Salesforce update-review payload.
+
+    Use **Upload CSV / Excel File** when you have a saved export file from Salesforce, UpLead, or another source.
 
     **Deep Scan**
 
