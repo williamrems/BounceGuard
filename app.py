@@ -1868,14 +1868,21 @@ with tab_bulk:
         paid_candidates = (df_final["PaidVerification_Eligible"] == PAID_VERIFICATION_YES).sum() if "PaidVerification_Eligible" in df_final.columns else 0
 
         st.markdown("### 🏆 Protection Report")
-        col_a, col_b, col_c, col_d, col_e, col_f, col_g = st.columns(7)
+        col_a, col_b, col_c, col_d, col_e, col_f = st.columns(6)
         col_a.metric("Emails Processed", f"{st.session_state.total_processed:,}")
         col_b.metric("✅ Domain Verified", f"{domain_verified:,}")
         col_c.metric("⚠️ Caution / Review", f"{caution:,}")
         col_d.metric("🚨 Suppress", f"{suppress:,}", delta="Risk Reduced", delta_color="normal")
         col_e.metric("🔬 Deep Scan Candidates", f"{deep_candidates:,}")
-        col_f.metric("Recovered by Deep Scan", f"{deep_recovered:,}")
-        col_g.metric("Paid API Candidates", f"{paid_candidates:,}")
+        col_f.metric("Paid API Candidates", f"{paid_candidates:,}")
+
+        with st.expander("Deep Scan recovery details", expanded=False):
+            st.markdown(
+                f"**Deep Scan Recovered Domains:** {deep_recovered:,}. "
+                "This means the first pass could not confirm the domain could receive email, "
+                "but the deeper multi-resolver DNS scan later found MX records. "
+                "It corrects possible domain-level false positives, but it does not prove the exact mailbox exists."
+            )
 
         st.markdown("---")
 
@@ -1892,7 +1899,7 @@ with tab_bulk:
             * **Completed by Local Rules:** {st.session_state.locally_completed_count:,}
             * **First-Pass DNS Checks:** {st.session_state.dns_ping_count:,}
             * **Clean Deep Scan Candidates:** {deep_candidates:,}
-            * **Recovered by Deep Scan:** {deep_recovered:,}
+            * **Deep Scan Recovered Domains:** {deep_recovered:,}
             * **Paid API Candidates:** {paid_candidates:,}
 
             **Local Efficiency Rate:** **{efficiency_rate:.1f}%** of this file was handled by local validation before DNS checks.
@@ -2114,18 +2121,12 @@ with tab_paste:
         st.markdown("---")
         st.markdown("### Current Pasted Results")
 
-        action_col_a, action_col_b = st.columns([1, 1])
-
-        with action_col_a:
-            run_paste_api_now = st.button(
-                "💳 Run Paid Verification API on Pasted Results",
-                use_container_width=True,
-                key="paste_run_api_now",
-                help="Optional paid third-party check. Requires ZeroBounce or NeverBounce API key in the sidebar. Only Paid API Candidates are sent."
-            )
-
-        with action_col_b:
-            st.info("Deep Scan already runs automatically after validation.")
+        run_paste_api_now = st.button(
+            "💳 Run Paid Verification API on Pasted Results",
+            use_container_width=True,
+            key="paste_run_api_now",
+            help="Optional paid third-party check. Requires ZeroBounce or NeverBounce API key in the sidebar. Only Paid API Candidates are sent."
+        )
 
         run_paste_deep_now = False
 
@@ -2193,14 +2194,21 @@ with tab_paste:
         paid_candidates = (df_final["PaidVerification_Eligible"] == PAID_VERIFICATION_YES).sum() if "PaidVerification_Eligible" in df_final.columns else 0
 
         st.markdown("### 🏆 Pasted Table Protection Report")
-        col_a, col_b, col_c, col_d, col_e, col_f, col_g = st.columns(7)
+        col_a, col_b, col_c, col_d, col_e, col_f = st.columns(6)
         col_a.metric("Emails Processed", f"{st.session_state.get('paste_total_processed', 0):,}")
         col_b.metric("✅ Domain Verified", f"{domain_verified:,}")
         col_c.metric("⚠️ Caution / Review", f"{caution:,}")
         col_d.metric("🚨 Suppress", f"{suppress:,}")
         col_e.metric("🔬 Deep Scan Candidates", f"{deep_candidates:,}")
-        col_f.metric("Recovered by Deep Scan", f"{deep_recovered:,}")
-        col_g.metric("Paid API Candidates", f"{paid_candidates:,}")
+        col_f.metric("Paid API Candidates", f"{paid_candidates:,}")
+
+        with st.expander("Deep Scan recovery details", expanded=False):
+            st.markdown(
+                f"**Deep Scan Recovered Domains:** {deep_recovered:,}. "
+                "This means the first pass could not confirm the domain could receive email, "
+                "but the deeper multi-resolver DNS scan later found MX records. "
+                "It corrects possible domain-level false positives, but it does not prove the exact mailbox exists."
+            )
 
         st.markdown("### 🔍 Pasted Results Explorer")
         filter_choice = st.radio(
