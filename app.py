@@ -1553,8 +1553,9 @@ def get_full_report_columns(df: pd.DataFrame) -> list:
 
 def get_salesforce_update_payload_columns(df: pd.DataFrame) -> list:
     """
-    Small payload for Salesforce Inspector update.
-    No duplicate report fields, no internal detail, no risk score.
+    Lean Salesforce update payload.
+    This should match the core fields created on Lead and Contact.
+    No source, no deep-scan technical detail, no risk score, no duplicate report fields.
     """
     cols = []
     for col in get_inspector_context_columns(df):
@@ -1569,9 +1570,7 @@ def get_salesforce_update_payload_columns(df: pd.DataFrame) -> list:
         "BounceGuard_Status__c",
         "BounceGuard_Detail__c",
         "BounceGuard_Last_Checked__c",
-        "BounceGuard_Source__c",
         "BounceGuard_Verify_Recommended__c",
-        "BounceGuard_Deep_Scan_Status__c",
     ]
 
     cols += [col for col in payload_cols if col in df.columns]
