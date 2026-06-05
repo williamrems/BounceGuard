@@ -1456,7 +1456,8 @@ def add_clean_bounceguard_output_columns(df: pd.DataFrame, source_label: str = "
     df_result = df.copy()
 
     df_result["BounceGuard_Action"] = df_result.get("BounceGuard_Status", "").apply(map_bounceguard_action)
-    df_result["BounceGuard_Status_Clean"] = df_result.get("BounceGuard_Status", "").apply(strip_status_icon)
+    # Keep the emoji status because it is faster to read at a glance and will be used in Salesforce picklists.
+    df_result["BounceGuard_Status_Display"] = df_result.get("BounceGuard_Status", "")
     df_result["BounceGuard_Detail"] = df_result.apply(build_bounceguard_detail, axis=1)
     df_result["BounceGuard_Last_Checked"] = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     df_result["BounceGuard_Source"] = source_label
@@ -1473,7 +1474,7 @@ def add_clean_bounceguard_output_columns(df: pd.DataFrame, source_label: str = "
 
     # Salesforce-ready aliases. These are the only __c output fields the update payload should use.
     df_result["BounceGuard_Action__c"] = df_result["BounceGuard_Action"]
-    df_result["BounceGuard_Status__c"] = df_result["BounceGuard_Status_Clean"]
+    df_result["BounceGuard_Status__c"] = df_result["BounceGuard_Status_Display"]
     df_result["BounceGuard_Detail__c"] = df_result["BounceGuard_Detail"].astype(str).str.slice(0, 32000)
     df_result["BounceGuard_Last_Checked__c"] = df_result["BounceGuard_Last_Checked"]
     df_result["BounceGuard_Source__c"] = df_result["BounceGuard_Source"]
@@ -1495,7 +1496,7 @@ def get_full_report_columns(df: pd.DataFrame) -> list:
 
     clean_cols = [
         "BounceGuard_Action",
-        "BounceGuard_Status_Clean",
+        "BounceGuard_Status_Display",
         "BounceGuard_Detail",
         "BounceGuard_Last_Checked",
         "BounceGuard_Source",
@@ -1525,6 +1526,8 @@ def get_full_report_columns(df: pd.DataFrame) -> list:
 
     for col in df.columns:
         if col in cols:
+            continue
+        if col == "BounceGuard_Status_Clean":
             continue
         if col.startswith(excluded_prefixes):
             continue
@@ -2239,7 +2242,7 @@ with tab_bulk:
             "Id",
             target_col,
             "BounceGuard_Action",
-            "BounceGuard_Status_Clean",
+            "BounceGuard_Status_Display",
             "BounceGuard_Detail",
             "BounceGuard_Deep_Scan_Status",
             "BounceGuard_Paid_Verification_Recommended",
@@ -2593,7 +2596,7 @@ with tab_paste:
             paste_target_col,
             "Name",
             "BounceGuard_Action",
-            "BounceGuard_Status_Clean",
+            "BounceGuard_Status_Display",
             "BounceGuard_Detail",
             "BounceGuard_Deep_Scan_Status",
             "BounceGuard_Paid_Verification_Recommended",
@@ -2656,7 +2659,7 @@ with tab_about:
 
     **Two Bulk Input Options**
 
-    Use **Paste Salesforce / Sheet Data** when copying rows from Salesforce Inspector, Excel, or Google Sheets. Salesforce Inspector's Copy (Excel) output can be pasted directly into BounceGuard, processed, and copied back out as Google Sheets TSV or a Salesforce update-review payload. If Inspector includes the leading `_` object context column, BounceGuard preserves it in the copy/export output.
+    Use **Paste Salesforce / Sheet Data** when copying rows from Salesforce Inspector, Excel, or Google Sheets. BounceGuard status values intentionally keep their emojis for fast visual scanning. Salesforce Inspector's Copy (Excel) output can be pasted directly into BounceGuard, processed, and copied back out as Google Sheets TSV or a Salesforce update-review payload. If Inspector includes the leading `_` object context column, BounceGuard preserves it in the copy/export output.
 
     Use **Upload CSV / Excel File** when you have a saved export file from Salesforce, UpLead, or another source.
 
