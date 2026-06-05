@@ -22,6 +22,7 @@ import re
 import io
 import math
 import os
+import csv
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, List
 
@@ -1205,6 +1206,147 @@ def generate_excel(df):
     return output.getvalue()
 
 
+
+# ============================================================
+# PASTE TABLE HELPERS
+# ============================================================
+
+def parse_pasted_table(raw_text: str) -> pd.DataFrame:
+    """
+    Parses table data copied from Salesforce Inspector, Excel, or Google Sheets.
+    Salesforce Inspector Copy (Excel) is usually tab-delimited, which this supports.
+    Falls back to CSV parsing if tabs are not present.
+    """
+    if not raw_text or not raw_text.strip():
+        return pd.DataFrame()
+
+    cleaned = raw_text.strip("\ufeff \n\r\t")
+    first_line = cleaned.splitlines()[0] if cleaned.splitlines() else ""
+    delimiter = "\t" if "\t" in first_line else ","
+
+    try:
+        if delimiter == "\t":
+            return pd.read_csv(io.StringIO(cleaned), sep="\t", dtype=str, keep_default_na=False)
+        return pd.read_csv(io.StringIO(cleaned), dtype=str, keep_default_na=False)
+    except Exception:
+        try:
+            dialect = csv.Sniffer().sniff(cleaned[:5000])
+            return pd.read_csv(io.StringIO(cleaned), sep=dialect.delimiter, dtype=str, keep_default_na=False)
+        except Exception as exc:
+            raise ValueError(f"Could not parse pasted table data: {exc}")
+
+
+def dataframe_to_tsv(df: pd.DataFrame, columns=None) -> str:
+    if df is None or df.empty:
+        return ""
+
+    if columns:
+        usable_cols = [col for col in columns if col in df.columns]
+        if usable_cols:
+            df = df[usable_cols]
+
+    output = io.StringIO()
+    df.to_csv(output, sep="\t", index=False, lineterminator="\n")
+    return output.getvalue()
+
+
+def generate_csv_bytes(df: pd.DataFrame) -> bytes:
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
+def add_salesforce_update_payload_columns(df: pd.DataFrame, source_label: str = "BounceGuard") -> pd.DataFrame:
+    """
+    Adds Salesforce-ready field columns to the processed dataframe.
+    This does not replace the analysis columns. It creates a clean update payload
+    users can paste into Google Sheets or Salesforce Inspector.
+    """
+    df_result = df.copy()
+
+    if "BounceGuard_Status" in df_result.columns:
+        df_result["BounceGuard_Status__c"] = df_result["BounceGuard_Status"]
+
+    if "BounceGuard_Risk_Level" in df_result.columns:
+        df_result["BounceGuard_Risk_Level__c"] = df_result["BounceGuard_Risk_Level"]
+
+    if "BounceGuard_Reason" in df_result.columns:
+        df_result["BounceGuard_Reason__c"] = df_result["BounceGuard_Reason"].astype(str).str.slice(0, 32000)
+
+    if "BounceGuard_Recommendation" in df_result.columns:
+        df_result["BounceGuard_Recommendation__c"] = df_result["BounceGuard_Recommendation"].astype(str).str.slice(0, 32000)
+
+    df_result["BounceGuard_Last_Checked__c"] = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    df_result["BounceGuard_Source__c"] = source_label
+
+    if "DeepScan_Status" in df_result.columns:
+        df_result["BounceGuard_Deep_Scan_Status__c"] = df_result["DeepScan_Status"]
+
+    if "PaidVerification_Eligible" in df_result.columns:
+        df_result["BounceGuard_Paid_Verification_Eligible__c"] = df_result["PaidVerification_Eligible"].eq(PAID_VERIFICATION_YES)
+
+    return df_result
+
+
+def get_salesforce_update_columns(df: pd.DataFrame) -> list:
+    preferred_cols = [
+        "Id",
+        "BounceGuard_Status__c",
+        "BounceGuard_Risk_Level__c",
+        "BounceGuard_Last_Checked__c",
+        "BounceGuard_Reason__c",
+        "BounceGuard_Recommendation__c",
+        "BounceGuard_Source__c",
+        "BounceGuard_Deep_Scan_Status__c",
+        "BounceGuard_Paid_Verification_Eligible__c",
+    ]
+
+    fallback_cols = [
+        "Id",
+        "BounceGuard_Status",
+        "BounceGuard_Risk_Level",
+        "BounceGuard_Risk_Score",
+        "BounceGuard_Reason",
+        "BounceGuard_Recommendation",
+        "BounceGuard_Suggested_Fix",
+        "DeepScan_Eligible",
+        "DeepScan_Status",
+        "DeepScan_Reason",
+        "DeepScan_Recommendation",
+        "PaidVerification_Eligible",
+        "PaidVerification_Reason",
+        "VerificationAPI_Status",
+        "VerificationAPI_Reason",
+    ]
+
+    if any(col in df.columns for col in preferred_cols):
+        return [col for col in preferred_cols if col in df.columns]
+
+    return [col for col in fallback_cols if col in df.columns]
+
+
+def guess_email_column(columns: list) -> int:
+    if not columns:
+        return 0
+
+    for i, col in enumerate(columns):
+        if str(col).strip().lower() == "email":
+            return i
+
+    for i, col in enumerate(columns):
+        if "email" in str(col).strip().lower():
+            return i
+
+    return 0
+
+
+def render_copy_text_area(label: str, text_value: str, key: str, height: int = 220):
+    st.text_area(
+        label,
+        value=text_value,
+        height=height,
+        key=key,
+        help="Click inside, press Ctrl+A, then Ctrl+C. Paste directly into Google Sheets, Excel, or Salesforce Inspector."
+    )
+
 # ============================================================
 # UI HELPERS
 # ============================================================
@@ -1300,9 +1442,10 @@ st.sidebar.caption(
 # TABS
 # ============================================================
 
-tab_single, tab_bulk, tab_about = st.tabs([
+tab_single, tab_bulk, tab_paste, tab_about = st.tabs([
     "🎯 Quick Check",
     "📁 Bulk List Scrubber",
+    "📋 Paste Table",
     "ℹ️ About"
 ])
 
@@ -1687,18 +1830,402 @@ with tab_bulk:
 
         st.dataframe(df_display[ordered_cols].head(250), use_container_width=True)
 
-        st.download_button(
-            label="📥 Download Full Validated List (.xlsx)",
-            data=generate_excel(df_final),
-            file_name="BounceGuard_Validated_List.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            use_container_width=True
-        )
+        st.markdown("### 📤 Copy / Export")
+
+        df_export = add_salesforce_update_payload_columns(df_final, source_label="BounceGuard CSV Upload")
+
+        export_tab_a, export_tab_b, export_tab_c = st.tabs([
+            "Google Sheets TSV",
+            "Salesforce Update TSV",
+            "Downloads"
+        ])
+
+        with export_tab_a:
+            st.caption("Copy this and paste directly into Google Sheets or Excel.")
+            render_copy_text_area(
+                "Google Sheets / Excel TSV",
+                dataframe_to_tsv(df_export),
+                key="bulk_google_sheets_tsv",
+                height=300
+            )
+
+        with export_tab_b:
+            st.caption(
+                "Use this as an update-review payload. Paste into Google Sheets first, review it, then use Salesforce Inspector if you want to update Salesforce."
+            )
+            update_cols = get_salesforce_update_columns(df_export)
+            render_copy_text_area(
+                "Salesforce Update TSV",
+                dataframe_to_tsv(df_export, update_cols),
+                key="bulk_salesforce_update_tsv",
+                height=300
+            )
+
+        with export_tab_c:
+            st.download_button(
+                label="📥 Download Full Validated List (.xlsx)",
+                data=generate_excel(df_export),
+                file_name="BounceGuard_Validated_List.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True
+            )
+
+            st.download_button(
+                label="📥 Download Full Validated List (.csv)",
+                data=generate_csv_bytes(df_export),
+                file_name="BounceGuard_Validated_List.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
 
 
 # ============================================================
-# TAB 3: SIMPLE CUSTOMER-FACING ABOUT
+# TAB 3: PASTE TABLE
+# ============================================================
+
+with tab_paste:
+    st.markdown("### Paste Table Scrubber")
+    st.markdown(
+        "Use this when you copy results from **Salesforce Inspector**, Excel, or Google Sheets. "
+        "For Salesforce Inspector, use **Copy (Excel)**, paste the results below, then run BounceGuard."
+    )
+
+    st.info(
+        "Recommended workflow: run SOQL in Salesforce Inspector, click Copy (Excel), paste here, run BounceGuard, then copy the Google Sheets TSV or Salesforce update payload."
+    )
+
+    pasted_text = st.text_area(
+        "Paste table data here",
+        height=260,
+        placeholder="Paste Salesforce Inspector Copy (Excel), Excel, or Google Sheets data here...",
+        key="paste_table_input"
+    )
+
+    parse_col_a, parse_col_b = st.columns([1, 1])
+    with parse_col_a:
+        parse_button = st.button("📋 Parse Pasted Table", type="primary", use_container_width=True)
+    with parse_col_b:
+        clear_paste_button = st.button("🗑️ Clear Pasted Data", use_container_width=True)
+
+    if clear_paste_button:
+        for key in [
+            "paste_df_raw",
+            "paste_df_final",
+            "paste_target_col",
+            "paste_total_processed",
+            "paste_locally_completed_count",
+            "paste_dns_ping_count"
+        ]:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.rerun()
+
+    if parse_button:
+        try:
+            df_paste = parse_pasted_table(pasted_text)
+            if df_paste.empty:
+                st.warning("No table data found. Paste copied rows with headers first.")
+            else:
+                st.session_state.paste_df_raw = df_paste
+                st.session_state.paste_df_final = None
+                st.success(f"Parsed {len(df_paste):,} rows and {len(df_paste.columns):,} columns.")
+        except Exception as exc:
+            st.error(f"Could not parse pasted table: {exc}")
+
+    if "paste_df_raw" in st.session_state and st.session_state.paste_df_raw is not None:
+        df_paste = st.session_state.paste_df_raw
+        paste_columns = list(df_paste.columns)
+
+        st.markdown("### Parsed Preview")
+        st.dataframe(df_paste.head(50), use_container_width=True)
+
+        paste_target_col = st.selectbox(
+            "🎯 Target Email Column",
+            options=paste_columns,
+            index=guess_email_column(paste_columns),
+            key="paste_target_email_col"
+        )
+        st.session_state.paste_target_col = paste_target_col
+
+        paste_auto_deep_scan = st.checkbox(
+            "Run automatic deep scan",
+            value=auto_deep_scan_default,
+            key="paste_auto_deep_scan",
+            help="Only checks clean questionable records after the first pass."
+        )
+
+        if st.button("🚀 Run BounceGuard on Pasted Table", type="primary", use_container_width=True):
+            df = df_paste.copy()
+
+            with st.spinner("Running local checks..."):
+                df["BounceGuard_Status"] = ""
+                df["BounceGuard_Reason"] = ""
+                df["BounceGuard_Recommendation"] = ""
+                df["BounceGuard_Suggested_Fix"] = ""
+
+                for idx, row in df.iterrows():
+                    raw_email = row[paste_target_col]
+                    result = format_and_trap_email(raw_email)
+
+                    df.at[idx, paste_target_col] = result.clean_email
+                    df.at[idx, "BounceGuard_Status"] = result.status
+                    df.at[idx, "BounceGuard_Reason"] = result.reason
+                    df.at[idx, "BounceGuard_Recommendation"] = result.recommendation
+                    df.at[idx, "BounceGuard_Suggested_Fix"] = result.suggested_fix
+
+                total_processed = len(df[df[paste_target_col] != ""])
+                locally_completed_count = (~df["BounceGuard_Status"].isin([STATUS_PENDING, STATUS_ROLE_BASED])).sum()
+                dns_ping_count = df["BounceGuard_Status"].isin([STATUS_PENDING, STATUS_ROLE_BASED]).sum()
+
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            chunk_size = 1000
+            num_chunks = max(math.ceil(len(df) / chunk_size), 1)
+
+            progress_bar = st.progress(0, text=f"Verifying domains... (0/{len(df):,})")
+            validator = EmailDomainValidator(max_concurrent=150)
+
+            processed_chunks = []
+            for i in range(num_chunks):
+                chunk = df.iloc[i * chunk_size: (i + 1) * chunk_size]
+                chunk_res = loop.run_until_complete(validator.process_batch(chunk, paste_target_col))
+                processed_chunks.append(chunk_res)
+
+                records_done = min((i + 1) * chunk_size, len(df))
+                progress_bar.progress(
+                    (i + 1) / num_chunks,
+                    text=f"Verifying domains... ({records_done:,}/{len(df):,})"
+                )
+
+            df_final = pd.concat(processed_chunks, ignore_index=True)
+            progress_bar.empty()
+
+            df_final = apply_scan_eligibility_columns(df_final, paste_target_col)
+
+            if paste_auto_deep_scan:
+                st.info("Running deep scan on clean questionable records only...")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+                deep_scanner = DeepDomainScanner(max_concurrent=50)
+                df_final = loop.run_until_complete(deep_scanner.process_candidates(df_final, paste_target_col))
+
+                deep_candidates = (df_final["DeepScan_Eligible"] == "Yes").sum()
+
+                if api_provider_default != "None" and api_key_default and deep_candidates > 0:
+                    st.info(f"Running {api_provider_default} verification API on {deep_candidates:,} deep scan candidates...")
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    df_final = loop.run_until_complete(
+                        run_verification_api_on_deep_candidates(
+                            df_final,
+                            paste_target_col,
+                            api_provider_default,
+                            api_key_default,
+                            max_concurrent=10
+                        )
+                    )
+
+            df_final = add_risk_score_columns(df_final)
+            df_final = add_salesforce_update_payload_columns(df_final, source_label="BounceGuard Paste Table")
+
+            st.session_state.paste_df_final = df_final
+            st.session_state.paste_total_processed = total_processed
+            st.session_state.paste_locally_completed_count = locally_completed_count
+            st.session_state.paste_dns_ping_count = dns_ping_count
+            st.success("Pasted table validation complete.")
+
+    if "paste_df_final" in st.session_state and st.session_state.paste_df_final is not None:
+        df_final = st.session_state.paste_df_final
+        paste_target_col = st.session_state.get("paste_target_col", None)
+
+        st.markdown("---")
+        st.markdown("### Current Pasted Results")
+
+        action_col_a, action_col_b = st.columns([1, 1])
+
+        with action_col_a:
+            run_paste_deep_now = st.button(
+                "🔬 Run Deep Scan on Pasted Results",
+                use_container_width=True,
+                key="paste_run_deep_now"
+            )
+
+        with action_col_b:
+            run_paste_api_now = st.button(
+                "🧪 Run Verification API on Pasted Results",
+                use_container_width=True,
+                key="paste_run_api_now"
+            )
+
+        if run_paste_deep_now:
+            if not paste_target_col:
+                st.warning("Target email column is missing. Re-parse the pasted table.")
+            else:
+                with st.spinner("Running deep scan on pasted results..."):
+                    df_work = apply_scan_eligibility_columns(df_final.copy(), paste_target_col)
+
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    deep_scanner = DeepDomainScanner(max_concurrent=50)
+                    df_work = loop.run_until_complete(deep_scanner.process_candidates(df_work, paste_target_col))
+
+                    if "VerificationAPI_Status" not in df_work.columns:
+                        df_work["VerificationAPI_Status"] = DEEP_API_SKIPPED
+
+                    df_work = add_risk_score_columns(df_work)
+                    df_work = add_salesforce_update_payload_columns(df_work, source_label="BounceGuard Paste Table")
+                    st.session_state.paste_df_final = df_work
+                    df_final = df_work
+
+                st.success("Deep scan complete.")
+
+        if run_paste_api_now:
+            if api_provider_default == "None" or not api_key_default:
+                st.warning("Choose a verification API provider and enter an API key in the sidebar first.")
+            elif not paste_target_col:
+                st.warning("Target email column is missing. Re-parse the pasted table.")
+            else:
+                with st.spinner(f"Running {api_provider_default} on pasted paid API candidates..."):
+                    df_work = df_final.copy()
+
+                    if "PaidVerification_Eligible" not in df_work.columns:
+                        df_work = apply_paid_verification_eligibility(df_work, paste_target_col)
+
+                    if not (df_work["PaidVerification_Eligible"] == PAID_VERIFICATION_YES).any():
+                        st.warning("No records are currently eligible for paid verification. Run deep scan first or review the skip reasons.")
+                    else:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        df_work = loop.run_until_complete(
+                            run_verification_api_on_deep_candidates(
+                                df_work,
+                                paste_target_col,
+                                api_provider_default,
+                                api_key_default,
+                                max_concurrent=10
+                            )
+                        )
+
+                        df_work = add_risk_score_columns(df_work)
+                        df_work = add_salesforce_update_payload_columns(df_work, source_label="BounceGuard Paste Table")
+                        st.session_state.paste_df_final = df_work
+                        df_final = df_work
+                        st.success(f"{api_provider_default} verification complete.")
+
+        domain_verified = df_final["BounceGuard_Status"].eq(STATUS_DOMAIN_VERIFIED).sum()
+        caution = df_final["BounceGuard_Status"].isin([STATUS_ROLE_BASED, STATUS_TYPO, STATUS_UNKNOWN]).sum()
+        suppress = df_final["BounceGuard_Status"].isin([STATUS_HIGH_RISK, STATUS_DISPOSABLE, STATUS_NO_MX, STATUS_SANDBOX_INVALID]).sum()
+        empty = df_final["BounceGuard_Status"].eq(STATUS_EMPTY).sum()
+        deep_candidates = (df_final["DeepScan_Eligible"] == "Yes").sum() if "DeepScan_Eligible" in df_final.columns else 0
+        deep_recovered = (df_final["DeepScan_Status"] == DEEP_MX_CONFIRMED).sum() if "DeepScan_Status" in df_final.columns else 0
+        paid_candidates = (df_final["PaidVerification_Eligible"] == PAID_VERIFICATION_YES).sum() if "PaidVerification_Eligible" in df_final.columns else 0
+
+        st.markdown("### 🏆 Pasted Table Protection Report")
+        col_a, col_b, col_c, col_d, col_e, col_f, col_g = st.columns(7)
+        col_a.metric("Emails Processed", f"{st.session_state.get('paste_total_processed', 0):,}")
+        col_b.metric("✅ Domain Verified", f"{domain_verified:,}")
+        col_c.metric("⚠️ Caution / Review", f"{caution:,}")
+        col_d.metric("🚨 Suppress", f"{suppress:,}")
+        col_e.metric("🔬 Deep Scan Candidates", f"{deep_candidates:,}")
+        col_f.metric("Recovered by Deep Scan", f"{deep_recovered:,}")
+        col_g.metric("Paid API Candidates", f"{paid_candidates:,}")
+
+        st.markdown("### 🔍 Pasted Results Explorer")
+        filter_choice = st.radio(
+            "Filter Pasted Results:",
+            ["All Records", "✅ Domain Verified", "⚠️ Caution / Review", "🚨 Suppress", "🔬 Deep Scan Candidates", "💳 Paid API Candidates", "⚪ Empty"],
+            horizontal=True,
+            key="paste_filter_results"
+        )
+
+        df_display = status_matches_filter(df_final.copy(), filter_choice)
+
+        display_cols = df_display.columns.tolist()
+        priority_cols = [
+            paste_target_col,
+            "Id",
+            "Name",
+            "BounceGuard_Status",
+            "BounceGuard_Risk_Level",
+            "BounceGuard_Risk_Score",
+            "BounceGuard_Reason",
+            "BounceGuard_Recommendation",
+            "BounceGuard_Suggested_Fix",
+            "DeepScan_Eligible",
+            "DeepScan_Status",
+            "DeepScan_Reason",
+            "DeepScan_Recommendation",
+            "PaidVerification_Eligible",
+            "PaidVerification_Reason",
+            "VerificationAPI_Status",
+            "VerificationAPI_Reason"
+        ]
+
+        ordered_cols = [col for col in priority_cols if col and col in display_cols]
+        ordered_cols += [col for col in display_cols if col not in ordered_cols]
+
+        st.dataframe(df_display[ordered_cols].head(250), use_container_width=True)
+
+        st.markdown("### 📤 Copy / Export")
+
+        export_tab_a, export_tab_b, export_tab_c, export_tab_d = st.tabs([
+            "Google Sheets TSV",
+            "Salesforce Update TSV",
+            "Downloads",
+            "Notes"
+        ])
+
+        with export_tab_a:
+            st.caption("Copy this and paste directly into Google Sheets or Excel.")
+            render_copy_text_area(
+                "Google Sheets / Excel TSV",
+                dataframe_to_tsv(df_final),
+                key="paste_google_sheets_tsv",
+                height=300
+            )
+
+        with export_tab_b:
+            st.caption(
+                "Use this as an update-review payload. Paste into Google Sheets first, review it, then use Salesforce Inspector if you want to update Salesforce."
+            )
+            update_cols = get_salesforce_update_columns(df_final)
+            render_copy_text_area(
+                "Salesforce Update TSV",
+                dataframe_to_tsv(df_final, update_cols),
+                key="paste_salesforce_update_tsv",
+                height=300
+            )
+
+        with export_tab_c:
+            st.download_button(
+                label="📥 Download Pasted Results (.xlsx)",
+                data=generate_excel(df_final),
+                file_name="BounceGuard_Pasted_Table_Results.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True
+            )
+
+            st.download_button(
+                label="📥 Download Pasted Results (.csv)",
+                data=generate_csv_bytes(df_final),
+                file_name="BounceGuard_Pasted_Table_Results.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+
+        with export_tab_d:
+            st.info(
+                "BounceGuard does not write to Salesforce from this tab. Use Salesforce Inspector for imports/updates after reviewing the output."
+            )
+
+
+# ============================================================
+# TAB 4: SIMPLE CUSTOMER-FACING ABOUT
 # ============================================================
 
 with tab_about:
@@ -1718,6 +2245,11 @@ with tab_about:
     * Disposable or temporary email domains
     * Domains that do not appear configured to receive email
     * Questionable domains that deserve a deeper second pass
+    * Salesforce Inspector, Excel, and Google Sheets pasted table input
+
+    **Paste Table**
+
+    Use the Paste Table tab when copying rows from Salesforce Inspector, Excel, or Google Sheets. Salesforce Inspector's Copy (Excel) output can be pasted directly into BounceGuard, processed, and copied back out as Google Sheets TSV or a Salesforce update-review payload.
 
     **Deep Scan**
 
