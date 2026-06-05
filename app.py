@@ -1213,6 +1213,63 @@ def generate_excel(df):
 # PASTE TABLE HELPERS
 # ============================================================
 
+def build_filter_labels(df: pd.DataFrame) -> dict:
+    """
+    Builds user-friendly filter labels with counts so the filter options match the dashboard.
+    """
+    if df is None or df.empty or "BounceGuard_Status" not in df.columns:
+        return {
+            "All Records": "All Records (0)",
+            "✅ Domain Verified": "✅ Domain Verified (0)",
+            "⚠️ Caution / Review": "⚠️ Caution / Review (0)",
+            "🚨 Suppress": "🚨 Suppress (0)",
+            "🔬 Deep Scan Candidates": "🔬 Deep Scan Candidates (0)",
+            "💳 Paid API Candidates": "💳 Paid API Candidates (0)",
+            "⚪ Empty": "⚪ Empty (0)",
+        }
+
+    all_records = len(df)
+    domain_verified = df["BounceGuard_Status"].eq(STATUS_DOMAIN_VERIFIED).sum()
+    caution = df["BounceGuard_Status"].isin([STATUS_ROLE_BASED, STATUS_TYPO, STATUS_UNKNOWN]).sum()
+    suppress = df["BounceGuard_Status"].isin([STATUS_HIGH_RISK, STATUS_DISPOSABLE, STATUS_NO_MX, STATUS_SANDBOX_INVALID]).sum()
+    empty = df["BounceGuard_Status"].eq(STATUS_EMPTY).sum()
+    deep_candidates = (df["DeepScan_Eligible"] == "Yes").sum() if "DeepScan_Eligible" in df.columns else 0
+    paid_candidates = (df["PaidVerification_Eligible"] == PAID_VERIFICATION_YES).sum() if "PaidVerification_Eligible" in df.columns else 0
+
+    return {
+        "All Records": f"All Records ({all_records:,})",
+        "✅ Domain Verified": f"✅ Domain Verified ({domain_verified:,})",
+        "⚠️ Caution / Review": f"⚠️ Caution / Review ({caution:,})",
+        "🚨 Suppress": f"🚨 Suppress ({suppress:,})",
+        "🔬 Deep Scan Candidates": f"🔬 Deep Scan Candidates ({deep_candidates:,})",
+        "💳 Paid API Candidates": f"💳 Paid API Candidates ({paid_candidates:,})",
+        "⚪ Empty": f"⚪ Empty ({empty:,})",
+    }
+
+
+def normalize_filter_choice(label: str) -> str:
+    """
+    Converts labels like '✅ Domain Verified (179)' back to the internal filter value.
+    """
+    if not label:
+        return "All Records"
+
+    for base in [
+        "All Records",
+        "✅ Domain Verified",
+        "⚠️ Caution / Review",
+        "🚨 Suppress",
+        "🔬 Deep Scan Candidates",
+        "💳 Paid API Candidates",
+        "⚪ Empty",
+    ]:
+        if label.startswith(base):
+            return base
+
+    return label
+
+
+
 def parse_pasted_table(raw_text: str) -> pd.DataFrame:
     """
     Parses table data copied from Salesforce Inspector, Excel, or Google Sheets.
@@ -1906,11 +1963,13 @@ with tab_bulk:
             """)
 
         st.markdown("### 🔍 Data Explorer")
-        filter_choice = st.radio(
+        filter_labels = build_filter_labels(df_final)
+        filter_choice_label = st.radio(
             "Filter Results:",
-            ["All Records", "✅ Domain Verified", "⚠️ Caution / Review", "🚨 Suppress", "🔬 Deep Scan Candidates", "💳 Paid API Candidates", "⚪ Empty"],
+            list(filter_labels.values()),
             horizontal=True
         )
+        filter_choice = normalize_filter_choice(filter_choice_label)
 
         df_display = status_matches_filter(df_final.copy(), filter_choice)
 
@@ -2211,12 +2270,14 @@ with tab_paste:
             )
 
         st.markdown("### 🔍 Pasted Results Explorer")
-        filter_choice = st.radio(
+        filter_labels = build_filter_labels(df_final)
+        filter_choice_label = st.radio(
             "Filter Pasted Results:",
-            ["All Records", "✅ Domain Verified", "⚠️ Caution / Review", "🚨 Suppress", "🔬 Deep Scan Candidates", "💳 Paid API Candidates", "⚪ Empty"],
+            list(filter_labels.values()),
             horizontal=True,
             key="paste_filter_results"
         )
+        filter_choice = normalize_filter_choice(filter_choice_label)
 
         df_display = status_matches_filter(df_final.copy(), filter_choice)
 
