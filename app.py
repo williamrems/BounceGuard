@@ -1213,6 +1213,16 @@ def generate_excel(df):
 # PASTE TABLE HELPERS
 # ============================================================
 
+
+def count_records_without_email(df: pd.DataFrame, email_col: str) -> int:
+    """
+    Counts records with blank/missing email in the currently selected email column.
+    """
+    if df is None or df.empty or not email_col or email_col not in df.columns:
+        return 0
+    return df[email_col].astype(str).str.strip().isin(["", "nan", "None"]).sum()
+
+
 def build_filter_labels(df: pd.DataFrame) -> dict:
     """
     Builds user-friendly filter labels with counts so the filter options match the dashboard.
@@ -1313,6 +1323,29 @@ def generate_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
+
+def get_inspector_context_columns(df: pd.DataFrame) -> list:
+    """
+    Salesforce Inspector Copy (Excel) often includes a first '_' column with values like [Lead].
+    Keep that context column in copy/export payloads because Inspector ignores it, and it adds clarity.
+    """
+    context_cols = []
+    for candidate in ["_", "attributes.type", "attributes"]:
+        if candidate in df.columns:
+            context_cols.append(candidate)
+    return context_cols
+
+
+def get_id_and_context_columns(df: pd.DataFrame) -> list:
+    cols = []
+    for col in get_inspector_context_columns(df):
+        if col not in cols:
+            cols.append(col)
+    if "Id" in df.columns:
+        cols.append("Id")
+    return cols
+
+
 def add_salesforce_update_payload_columns(df: pd.DataFrame, source_label: str = "BounceGuard") -> pd.DataFrame:
     """
     Adds Salesforce-ready field columns to the processed dataframe.
@@ -1346,8 +1379,9 @@ def add_salesforce_update_payload_columns(df: pd.DataFrame, source_label: str = 
 
 
 def get_salesforce_update_columns(df: pd.DataFrame) -> list:
-    preferred_cols = [
-        "Id",
+    id_context_cols = get_id_and_context_columns(df)
+
+    preferred_cols = id_context_cols + [
         "BounceGuard_Status__c",
         "BounceGuard_Risk_Level__c",
         "BounceGuard_Last_Checked__c",
@@ -1358,8 +1392,7 @@ def get_salesforce_update_columns(df: pd.DataFrame) -> list:
         "BounceGuard_Paid_Verification_Eligible__c",
     ]
 
-    fallback_cols = [
-        "Id",
+    fallback_cols = id_context_cols + [
         "BounceGuard_Status",
         "BounceGuard_Risk_Level",
         "BounceGuard_Risk_Score",
@@ -1376,7 +1409,13 @@ def get_salesforce_update_columns(df: pd.DataFrame) -> list:
         "VerificationAPI_Reason",
     ]
 
-    if any(col in df.columns for col in preferred_cols):
+    if any(col in df.columns for col in [
+        "BounceGuard_Status__c",
+        "BounceGuard_Risk_Level__c",
+        "BounceGuard_Last_Checked__c",
+        "BounceGuard_Reason__c",
+        "BounceGuard_Recommendation__c"
+    ]):
         return [col for col in preferred_cols if col in df.columns]
 
     return [col for col in fallback_cols if col in df.columns]
@@ -1924,14 +1963,17 @@ with tab_bulk:
         deep_recovered = (df_final["DeepScan_Status"] == DEEP_MX_CONFIRMED).sum() if "DeepScan_Status" in df_final.columns else 0
         paid_candidates = (df_final["PaidVerification_Eligible"] == PAID_VERIFICATION_YES).sum() if "PaidVerification_Eligible" in df_final.columns else 0
 
+        no_email_records = count_records_without_email(df_final, target_col)
+
         st.markdown("### 🏆 Protection Report")
-        col_a, col_b, col_c, col_d, col_e, col_f = st.columns(6)
-        col_a.metric("Emails Processed", f"{st.session_state.total_processed:,}")
-        col_b.metric("✅ Domain Verified", f"{domain_verified:,}")
-        col_c.metric("⚠️ Caution / Review", f"{caution:,}")
-        col_d.metric("🚨 Suppress", f"{suppress:,}", delta="Risk Reduced", delta_color="normal")
-        col_e.metric("🔬 Deep Scan Candidates", f"{deep_candidates:,}")
-        col_f.metric("Paid API Candidates", f"{paid_candidates:,}")
+        col_a, col_b, col_c, col_d, col_e, col_f, col_g = st.columns(7)
+        col_a.metric("Records", f"{len(df_final):,}")
+        col_b.metric("No Email", f"{no_email_records:,}")
+        col_c.metric("✅ Domain Verified", f"{domain_verified:,}")
+        col_d.metric("⚠️ Caution / Review", f"{caution:,}")
+        col_e.metric("🚨 Suppress", f"{suppress:,}", delta="Risk Reduced", delta_color="normal")
+        col_f.metric("🔬 Deep Scan Candidates", f"{deep_candidates:,}")
+        col_g.metric("Paid API Candidates", f"{paid_candidates:,}")
 
         with st.expander("Deep Scan recovery details", expanded=False):
             st.markdown(
@@ -1975,6 +2017,8 @@ with tab_bulk:
 
         display_cols = df_display.columns.tolist()
         priority_cols = [
+            "_",
+            "Id",
             target_col,
             "BounceGuard_Status",
             "BounceGuard_Risk_Level",
@@ -2252,14 +2296,17 @@ with tab_paste:
         deep_recovered = (df_final["DeepScan_Status"] == DEEP_MX_CONFIRMED).sum() if "DeepScan_Status" in df_final.columns else 0
         paid_candidates = (df_final["PaidVerification_Eligible"] == PAID_VERIFICATION_YES).sum() if "PaidVerification_Eligible" in df_final.columns else 0
 
+        no_email_records = count_records_without_email(df_final, paste_target_col)
+
         st.markdown("### 🏆 Pasted Table Protection Report")
-        col_a, col_b, col_c, col_d, col_e, col_f = st.columns(6)
-        col_a.metric("Emails Processed", f"{st.session_state.get('paste_total_processed', 0):,}")
-        col_b.metric("✅ Domain Verified", f"{domain_verified:,}")
-        col_c.metric("⚠️ Caution / Review", f"{caution:,}")
-        col_d.metric("🚨 Suppress", f"{suppress:,}")
-        col_e.metric("🔬 Deep Scan Candidates", f"{deep_candidates:,}")
-        col_f.metric("Paid API Candidates", f"{paid_candidates:,}")
+        col_a, col_b, col_c, col_d, col_e, col_f, col_g = st.columns(7)
+        col_a.metric("Records", f"{len(df_final):,}")
+        col_b.metric("No Email", f"{no_email_records:,}")
+        col_c.metric("✅ Domain Verified", f"{domain_verified:,}")
+        col_d.metric("⚠️ Caution / Review", f"{caution:,}")
+        col_e.metric("🚨 Suppress", f"{suppress:,}")
+        col_f.metric("🔬 Deep Scan Candidates", f"{deep_candidates:,}")
+        col_g.metric("Paid API Candidates", f"{paid_candidates:,}")
 
         with st.expander("Deep Scan recovery details", expanded=False):
             st.markdown(
@@ -2283,8 +2330,9 @@ with tab_paste:
 
         display_cols = df_display.columns.tolist()
         priority_cols = [
-            paste_target_col,
+            "_",
             "Id",
+            paste_target_col,
             "Name",
             "BounceGuard_Status",
             "BounceGuard_Risk_Level",
@@ -2351,7 +2399,7 @@ with tab_about:
 
     **Two Bulk Input Options**
 
-    Use **Paste Salesforce / Sheet Data** when copying rows from Salesforce Inspector, Excel, or Google Sheets. Salesforce Inspector's Copy (Excel) output can be pasted directly into BounceGuard, processed, and copied back out as Google Sheets TSV or a Salesforce update-review payload.
+    Use **Paste Salesforce / Sheet Data** when copying rows from Salesforce Inspector, Excel, or Google Sheets. Salesforce Inspector's Copy (Excel) output can be pasted directly into BounceGuard, processed, and copied back out as Google Sheets TSV or a Salesforce update-review payload. If Inspector includes the leading `_` object context column, BounceGuard preserves it in the copy/export output.
 
     Use **Upload CSV / Excel File** when you have a saved export file from Salesforce, UpLead, or another source.
 
