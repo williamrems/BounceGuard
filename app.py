@@ -1639,25 +1639,30 @@ def render_copy_export_panel(
 ):
     """
     Shared export UI for both upload mode and pasted-table mode.
-    Primary experience is one-click copy buttons. Raw TSV is tucked away as fallback.
-    Full report and update payload are both cleaned to avoid duplicate fields.
+
+    Full Report = analysis/review output.
+    Salesforce Update Payload = small update file for Salesforce Inspector, Workbench, or Data Loader.
     """
     full_report_cols = get_full_report_columns(df_for_export)
-    sheets_tsv = dataframe_to_tsv(df_for_export, full_report_cols)
     update_cols = get_salesforce_update_columns(df_for_export)
-    sf_tsv = dataframe_to_tsv(df_for_export, update_cols)
+
+    full_report_df = df_for_export[full_report_cols]
+    update_payload_df = df_for_export[update_cols]
+
+    sheets_tsv = dataframe_to_tsv(full_report_df)
+    sf_tsv = dataframe_to_tsv(update_payload_df)
 
     copy_col_a, copy_col_b = st.columns([1, 1])
     with copy_col_a:
-        render_clipboard_button("📋 Copy Google Sheets / Excel TSV", sheets_tsv, google_key)
+        render_clipboard_button("📋 Copy Full Report TSV", sheets_tsv, google_key)
     with copy_col_b:
         render_clipboard_button("📋 Copy Salesforce Update TSV", sf_tsv, sf_key)
 
     with st.expander("Show raw copy text fallback", expanded=False):
-        fallback_tab_a, fallback_tab_b = st.tabs(["Google Sheets TSV", "Salesforce Update TSV"])
+        fallback_tab_a, fallback_tab_b = st.tabs(["Full Report TSV", "Salesforce Update TSV"])
         with fallback_tab_a:
             render_copy_text_area(
-                "Google Sheets / Excel TSV",
+                "Full Report TSV",
                 sheets_tsv,
                 key=f"{google_key}_fallback",
                 height=220
@@ -1671,11 +1676,15 @@ def render_copy_export_panel(
             )
 
     st.markdown("#### Downloads")
+    st.caption(
+        "Use Full Report for analysis. Use Salesforce Update Payload for Salesforce Inspector, Workbench, Data Loader, or another update tool."
+    )
+
     dl_col_a, dl_col_b = st.columns([1, 1])
     with dl_col_a:
         st.download_button(
-            label=xlsx_label,
-            data=generate_excel(df_for_export),
+            label="📥 Download Full Report (.xlsx)",
+            data=generate_excel(full_report_df),
             file_name=download_xlsx_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
@@ -1683,10 +1692,31 @@ def render_copy_export_panel(
         )
     with dl_col_b:
         st.download_button(
-            label=csv_label,
-            data=generate_csv_bytes(df_for_export),
+            label="📥 Download Full Report (.csv)",
+            data=generate_csv_bytes(full_report_df),
             file_name=download_csv_name,
             mime="text/csv",
+            use_container_width=True
+        )
+
+    update_csv_name = download_csv_name.replace(".csv", "_Salesforce_Update_Payload.csv")
+    update_xlsx_name = download_xlsx_name.replace(".xlsx", "_Salesforce_Update_Payload.xlsx")
+
+    dl_col_c, dl_col_d = st.columns([1, 1])
+    with dl_col_c:
+        st.download_button(
+            label="📥 Download Salesforce Update Payload (.csv)",
+            data=generate_csv_bytes(update_payload_df),
+            file_name=update_csv_name,
+            mime="text/csv",
+            use_container_width=True
+        )
+    with dl_col_d:
+        st.download_button(
+            label="📥 Download Salesforce Update Payload (.xlsx)",
+            data=generate_excel(update_payload_df),
+            file_name=update_xlsx_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True
         )
 
@@ -2269,8 +2299,8 @@ with tab_bulk:
             df_for_export=df_export,
             google_key="bulk_google_sheets_tsv",
             sf_key="bulk_salesforce_update_tsv",
-            download_xlsx_name="BounceGuard_Validated_List.xlsx",
-            download_csv_name="BounceGuard_Validated_List.csv",
+            download_xlsx_name="BounceGuard_Full_Report.xlsx",
+            download_csv_name="BounceGuard_Full_Report.csv",
             xlsx_label="📥 Download Full Validated List (.xlsx)",
             csv_label="📥 Download Full Validated List (.csv)"
         )
@@ -2621,8 +2651,8 @@ with tab_paste:
             df_for_export=df_final,
             google_key="paste_google_sheets_tsv",
             sf_key="paste_salesforce_update_tsv",
-            download_xlsx_name="BounceGuard_Pasted_Table_Results.xlsx",
-            download_csv_name="BounceGuard_Pasted_Table_Results.csv",
+            download_xlsx_name="BounceGuard_Full_Report.xlsx",
+            download_csv_name="BounceGuard_Full_Report.csv",
             xlsx_label="📥 Download Pasted Results (.xlsx)",
             csv_label="📥 Download Pasted Results (.csv)"
         )
