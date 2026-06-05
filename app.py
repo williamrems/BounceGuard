@@ -1353,77 +1353,215 @@ def get_id_and_context_columns(df: pd.DataFrame) -> list:
 
 def add_salesforce_update_payload_columns(df: pd.DataFrame, source_label: str = "BounceGuard") -> pd.DataFrame:
     """
-    Adds Salesforce-ready field columns to the processed dataframe.
-    This does not replace the analysis columns. It creates a clean update payload
-    users can paste into Google Sheets or Salesforce Inspector.
+    Backward-compatible wrapper name.
+    Adds clean report fields and Salesforce-ready update fields without duplicate mirrors.
+    """
+    return add_clean_bounceguard_output_columns(df, source_label=source_label)
+
+
+
+# ============================================================
+# OUTPUT CLEANUP HELPERS
+# ============================================================
+
+def strip_status_icon(value) -> str:
+    """
+    Converts app-friendly emoji statuses into Salesforce/report-friendly plain text.
+    """
+    if pd.isna(value):
+        return ""
+
+    text = str(value).strip()
+
+    icon_prefixes = [
+        "✅ ",
+        "⚠️ ",
+        "🚨 ",
+        "🚫 ",
+        "❔ ",
+        "⚪ ",
+        "🔬 ",
+        "💳 ",
+    ]
+
+    for prefix in icon_prefixes:
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+
+    return text
+
+
+def map_bounceguard_action(status_value: str) -> str:
+    """
+    Simple business decision field.
+    This is the field Marketing Safe should eventually care about most.
+    """
+    clean_status = strip_status_icon(status_value)
+
+    if clean_status in ["Domain Verified"]:
+        return "Send Ready"
+
+    if clean_status in ["Role-Based Address", "Unknown / Needs Review", "Likely Domain Typo"]:
+        return "Review"
+
+    if clean_status in [
+        "Invalid / High Bounce Risk",
+        "Disposable / Temporary Email",
+        "Domain Cannot Receive Email",
+        "Salesforce Sandbox Invalid Email",
+    ]:
+        return "Suppress"
+
+    if clean_status in ["Empty", "No Email"]:
+        return "No Email"
+
+    return "Review"
+
+
+def build_bounceguard_detail(row: pd.Series) -> str:
+    """
+    One readable detail field instead of duplicated reason + recommendation fields.
+    """
+    reason = str(row.get("BounceGuard_Reason", "") or "").strip()
+    recommendation = str(row.get("BounceGuard_Recommendation", "") or "").strip()
+
+    if reason and recommendation and recommendation not in reason:
+        return f"{reason} Recommendation: {recommendation}"
+
+    return reason or recommendation
+
+
+def normalize_deep_scan_status(value) -> str:
+    clean = strip_status_icon(value)
+
+    mappings = {
+        "Deep Scan: MX Confirmed": "MX Confirmed",
+        "Deep Scan: No MX Confirmed": "No MX Confirmed",
+        "Deep Scan: Website Exists, No MX": "Website Exists, No MX",
+        "Deep Scan: DNS Inconclusive": "DNS Inconclusive",
+        "Verification API: Valid": "API Valid",
+        "Verification API: Invalid": "API Invalid",
+        "Verification API: Risky / Unknown": "API Risky / Unknown",
+        "Verification API Skipped": "API Skipped",
+    }
+
+    return mappings.get(clean, clean)
+
+
+def add_clean_bounceguard_output_columns(df: pd.DataFrame, source_label: str = "BounceGuard") -> pd.DataFrame:
+    """
+    Adds the final clean output fields used by full report and Salesforce update payload.
+    The app can still keep internal analysis columns, but exports should favor these.
     """
     df_result = df.copy()
 
-    if "BounceGuard_Status" in df_result.columns:
-        df_result["BounceGuard_Status__c"] = df_result["BounceGuard_Status"]
-
-    if "BounceGuard_Risk_Level" in df_result.columns:
-        df_result["BounceGuard_Risk_Level__c"] = df_result["BounceGuard_Risk_Level"]
-
-    if "BounceGuard_Reason" in df_result.columns:
-        df_result["BounceGuard_Reason__c"] = df_result["BounceGuard_Reason"].astype(str).str.slice(0, 32000)
-
-    if "BounceGuard_Recommendation" in df_result.columns:
-        df_result["BounceGuard_Recommendation__c"] = df_result["BounceGuard_Recommendation"].astype(str).str.slice(0, 32000)
-
-    df_result["BounceGuard_Last_Checked__c"] = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    df_result["BounceGuard_Source__c"] = source_label
-
-    if "DeepScan_Status" in df_result.columns:
-        df_result["BounceGuard_Deep_Scan_Status__c"] = df_result["DeepScan_Status"]
+    df_result["BounceGuard_Action"] = df_result.get("BounceGuard_Status", "").apply(map_bounceguard_action)
+    df_result["BounceGuard_Status_Clean"] = df_result.get("BounceGuard_Status", "").apply(strip_status_icon)
+    df_result["BounceGuard_Detail"] = df_result.apply(build_bounceguard_detail, axis=1)
+    df_result["BounceGuard_Last_Checked"] = pd.Timestamp.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    df_result["BounceGuard_Source"] = source_label
 
     if "PaidVerification_Eligible" in df_result.columns:
-        df_result["BounceGuard_Paid_Verification_Eligible__c"] = df_result["PaidVerification_Eligible"].eq(PAID_VERIFICATION_YES)
+        df_result["BounceGuard_Paid_Verification_Recommended"] = df_result["PaidVerification_Eligible"].eq(PAID_VERIFICATION_YES)
+    else:
+        df_result["BounceGuard_Paid_Verification_Recommended"] = False
+
+    if "DeepScan_Status" in df_result.columns:
+        df_result["BounceGuard_Deep_Scan_Status"] = df_result["DeepScan_Status"].apply(normalize_deep_scan_status)
+    else:
+        df_result["BounceGuard_Deep_Scan_Status"] = ""
+
+    # Salesforce-ready aliases. These are the only __c output fields the update payload should use.
+    df_result["BounceGuard_Action__c"] = df_result["BounceGuard_Action"]
+    df_result["BounceGuard_Status__c"] = df_result["BounceGuard_Status_Clean"]
+    df_result["BounceGuard_Detail__c"] = df_result["BounceGuard_Detail"].astype(str).str.slice(0, 32000)
+    df_result["BounceGuard_Last_Checked__c"] = df_result["BounceGuard_Last_Checked"]
+    df_result["BounceGuard_Source__c"] = df_result["BounceGuard_Source"]
+    df_result["BounceGuard_Paid_Verification_Recommended__c"] = df_result["BounceGuard_Paid_Verification_Recommended"]
+    df_result["BounceGuard_Deep_Scan_Status__c"] = df_result["BounceGuard_Deep_Scan_Status"]
 
     return df_result
 
 
-def get_salesforce_update_columns(df: pd.DataFrame) -> list:
-    id_context_cols = get_id_and_context_columns(df)
+def get_full_report_columns(df: pd.DataFrame) -> list:
+    """
+    Full report: keeps original input context plus clean BounceGuard decision fields.
+    Removes duplicate __c mirrors and internal/noisy fields.
+    """
+    context_cols = []
+    for col in ["_", "Id", "Name", "Email", "FirstName", "LastName", "Company", "Website"]:
+        if col in df.columns and col not in context_cols:
+            context_cols.append(col)
 
-    preferred_cols = id_context_cols + [
-        "BounceGuard_Status__c",
-        "BounceGuard_Risk_Level__c",
-        "BounceGuard_Last_Checked__c",
-        "BounceGuard_Reason__c",
-        "BounceGuard_Recommendation__c",
-        "BounceGuard_Source__c",
-        "BounceGuard_Deep_Scan_Status__c",
-        "BounceGuard_Paid_Verification_Eligible__c",
+    clean_cols = [
+        "BounceGuard_Action",
+        "BounceGuard_Status_Clean",
+        "BounceGuard_Detail",
+        "BounceGuard_Last_Checked",
+        "BounceGuard_Source",
+        "BounceGuard_Paid_Verification_Recommended",
+        "BounceGuard_Deep_Scan_Status",
     ]
 
-    fallback_cols = id_context_cols + [
-        "BounceGuard_Status",
-        "BounceGuard_Risk_Level",
-        "BounceGuard_Risk_Score",
-        "BounceGuard_Reason",
-        "BounceGuard_Recommendation",
-        "BounceGuard_Suggested_Fix",
+    optional_review_cols = [
         "DeepScan_Eligible",
-        "DeepScan_Status",
-        "DeepScan_Reason",
-        "DeepScan_Recommendation",
         "PaidVerification_Eligible",
         "PaidVerification_Reason",
         "VerificationAPI_Status",
         "VerificationAPI_Reason",
     ]
 
-    if any(col in df.columns for col in [
-        "BounceGuard_Status__c",
-        "BounceGuard_Risk_Level__c",
-        "BounceGuard_Last_Checked__c",
-        "BounceGuard_Reason__c",
-        "BounceGuard_Recommendation__c"
-    ]):
-        return [col for col in preferred_cols if col in df.columns]
+    cols = context_cols
+    cols += [col for col in clean_cols if col in df.columns]
+    cols += [col for col in optional_review_cols if col in df.columns]
 
-    return [col for col in fallback_cols if col in df.columns]
+    # Include any original user/source columns that are not BounceGuard/internal generated.
+    excluded_prefixes = (
+        "BounceGuard_",
+        "DeepScan_",
+        "PaidVerification_",
+        "VerificationAPI_",
+    )
+
+    for col in df.columns:
+        if col in cols:
+            continue
+        if col.startswith(excluded_prefixes):
+            continue
+        cols.append(col)
+
+    return [col for col in cols if col in df.columns]
+
+
+def get_salesforce_update_payload_columns(df: pd.DataFrame) -> list:
+    """
+    Small payload for Salesforce Inspector update.
+    No duplicate report fields, no internal detail, no risk score.
+    """
+    cols = []
+    for col in get_inspector_context_columns(df):
+        if col not in cols:
+            cols.append(col)
+
+    if "Id" in df.columns:
+        cols.append("Id")
+
+    payload_cols = [
+        "BounceGuard_Action__c",
+        "BounceGuard_Status__c",
+        "BounceGuard_Detail__c",
+        "BounceGuard_Last_Checked__c",
+        "BounceGuard_Source__c",
+        "BounceGuard_Paid_Verification_Recommended__c",
+        "BounceGuard_Deep_Scan_Status__c",
+    ]
+
+    cols += [col for col in payload_cols if col in df.columns]
+    return cols
+
+
+def get_salesforce_update_columns(df: pd.DataFrame) -> list:
+    return get_salesforce_update_payload_columns(df)
 
 
 def guess_email_column(columns: list) -> int:
@@ -1499,8 +1637,10 @@ def render_copy_export_panel(
     """
     Shared export UI for both upload mode and pasted-table mode.
     Primary experience is one-click copy buttons. Raw TSV is tucked away as fallback.
+    Full report and update payload are both cleaned to avoid duplicate fields.
     """
-    sheets_tsv = dataframe_to_tsv(df_for_export)
+    full_report_cols = get_full_report_columns(df_for_export)
+    sheets_tsv = dataframe_to_tsv(df_for_export, full_report_cols)
     update_cols = get_salesforce_update_columns(df_for_export)
     sf_tsv = dataframe_to_tsv(df_for_export, update_cols)
 
@@ -1953,6 +2093,9 @@ with tab_bulk:
         df_final = st.session_state.df_final
         target_col = st.session_state.target_col
 
+        df_final = add_clean_bounceguard_output_columns(df_final, source_label="BounceGuard CSV Upload")
+        st.session_state.df_final = df_final
+
         st.markdown("---")
         st.markdown("### Current Results")
 
@@ -2095,12 +2238,11 @@ with tab_bulk:
             "_",
             "Id",
             target_col,
-            "BounceGuard_Status",
-            "BounceGuard_Risk_Level",
-            "BounceGuard_Risk_Score",
-            "BounceGuard_Reason",
-            "BounceGuard_Recommendation",
-            "BounceGuard_Suggested_Fix",
+            "BounceGuard_Action",
+            "BounceGuard_Status_Clean",
+            "BounceGuard_Detail",
+            "BounceGuard_Deep_Scan_Status",
+            "BounceGuard_Paid_Verification_Recommended",
             "DeepScan_Eligible",
             "DeepScan_Status",
             "DeepScan_Reason",
@@ -2322,6 +2464,9 @@ with tab_paste:
         df_final = st.session_state.paste_df_final
         paste_target_col = st.session_state.get("paste_target_col", None)
 
+        df_final = add_clean_bounceguard_output_columns(df_final, source_label="BounceGuard Paste Table")
+        st.session_state.paste_df_final = df_final
+
         st.markdown("---")
         st.markdown("### Current Pasted Results")
 
@@ -2447,12 +2592,11 @@ with tab_paste:
             "Id",
             paste_target_col,
             "Name",
-            "BounceGuard_Status",
-            "BounceGuard_Risk_Level",
-            "BounceGuard_Risk_Score",
-            "BounceGuard_Reason",
-            "BounceGuard_Recommendation",
-            "BounceGuard_Suggested_Fix",
+            "BounceGuard_Action",
+            "BounceGuard_Status_Clean",
+            "BounceGuard_Detail",
+            "BounceGuard_Deep_Scan_Status",
+            "BounceGuard_Paid_Verification_Recommended",
             "DeepScan_Eligible",
             "DeepScan_Status",
             "DeepScan_Reason",
