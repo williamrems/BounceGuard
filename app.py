@@ -1692,43 +1692,44 @@ def render_copy_export_panel(
 
     st.markdown("#### Downloads")
     st.caption(
-        "Use Full Report for analysis. Use Salesforce Update Payload for Salesforce Inspector, Workbench, Data Loader, or another update tool."
+        "Full Report is for review and analysis. Salesforce Update Payload is the smaller file for Salesforce Inspector, Workbench, Data Loader, or another update tool."
     )
 
-    dl_col_a, dl_col_b = st.columns([1, 1])
-    with dl_col_a:
+    update_csv_name = download_csv_name.replace(".csv", "_Salesforce_Update_Payload.csv")
+    update_xlsx_name = download_xlsx_name.replace(".xlsx", "_Salesforce_Update_Payload.xlsx")
+
+    report_col, update_col = st.columns([1, 1])
+
+    with report_col:
+        st.markdown("##### Full Report")
+        st.caption("Use this for Google Sheets, Excel, review, analysis, and sharing.")
         st.download_button(
-            label="📥 Download Full Report (.xlsx)",
-            data=generate_excel(full_report_df),
-            file_name=download_xlsx_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            use_container_width=True
-        )
-    with dl_col_b:
-        st.download_button(
-            label="📥 Download Full Report (.csv)",
+            label="Download Full Report (.csv)",
             data=generate_csv_bytes(full_report_df),
             file_name=download_csv_name,
             mime="text/csv",
             use_container_width=True
         )
-
-    update_csv_name = download_csv_name.replace(".csv", "_Salesforce_Update_Payload.csv")
-    update_xlsx_name = download_xlsx_name.replace(".xlsx", "_Salesforce_Update_Payload.xlsx")
-
-    dl_col_c, dl_col_d = st.columns([1, 1])
-    with dl_col_c:
         st.download_button(
-            label="📥 Download Salesforce Update Payload (.csv)",
+            label="Download Full Report (.xlsx)",
+            data=generate_excel(full_report_df),
+            file_name=download_xlsx_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
+
+    with update_col:
+        st.markdown("##### Salesforce Update Payload")
+        st.caption("Use this smaller file when updating BounceGuard fields back into Salesforce.")
+        st.download_button(
+            label="Download Update Payload (.csv)",
             data=generate_csv_bytes(update_payload_df),
             file_name=update_csv_name,
             mime="text/csv",
             use_container_width=True
         )
-    with dl_col_d:
         st.download_button(
-            label="📥 Download Salesforce Update Payload (.xlsx)",
+            label="Download Update Payload (.xlsx)",
             data=generate_excel(update_payload_df),
             file_name=update_xlsx_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
