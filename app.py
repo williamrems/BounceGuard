@@ -15,6 +15,7 @@ that a specific mailbox exists unless a verification provider confirms it.
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import asyncio
 import aiohttp
@@ -1338,6 +1339,113 @@ def guess_email_column(columns: list) -> int:
     return 0
 
 
+
+def render_clipboard_button(label: str, text_value: str, button_key: str):
+    """
+    Renders a browser-side one-click copy button.
+    Uses navigator.clipboard when available and shows inline feedback.
+    """
+    safe_text = text_value or ""
+    html_payload = f"""
+    <div style="margin: 0.25rem 0 0.75rem 0;">
+      <button id="copy-btn-{button_key}" style="
+          background-color: #0f6cbd;
+          color: white;
+          border: none;
+          border-radius: 6px;
+          padding: 0.55rem 0.9rem;
+          font-weight: 600;
+          cursor: pointer;
+          width: 100%;
+      ">{label}</button>
+      <div id="copy-msg-{button_key}" style="
+          margin-top: 0.35rem;
+          font-size: 0.85rem;
+          color: #2e7d32;
+          min-height: 1.2rem;
+      "></div>
+    </div>
+    <script>
+      const btn_{button_key} = document.getElementById("copy-btn-{button_key}");
+      const msg_{button_key} = document.getElementById("copy-msg-{button_key}");
+      const text_{button_key} = {safe_text!r};
+
+      btn_{button_key}.addEventListener("click", async () => {{
+        try {{
+          await navigator.clipboard.writeText(text_{button_key});
+          msg_{button_key}.innerText = "Copied to clipboard.";
+          setTimeout(() => msg_{button_key}.innerText = "", 2500);
+        }} catch (err) {{
+          msg_{button_key}.style.color = "#b71c1c";
+          msg_{button_key}.innerText = "Copy failed. Use the fallback text box below.";
+        }}
+      }});
+    </script>
+    """
+    components.html(html_payload, height=92)
+
+
+def render_copy_export_panel(
+    df_for_export: pd.DataFrame,
+    google_key: str,
+    sf_key: str,
+    download_xlsx_name: str,
+    download_csv_name: str,
+    xlsx_label: str,
+    csv_label: str
+):
+    """
+    Shared export UI for both upload mode and pasted-table mode.
+    Primary experience is one-click copy buttons. Raw TSV is tucked away as fallback.
+    """
+    sheets_tsv = dataframe_to_tsv(df_for_export)
+    update_cols = get_salesforce_update_columns(df_for_export)
+    sf_tsv = dataframe_to_tsv(df_for_export, update_cols)
+
+    copy_col_a, copy_col_b = st.columns([1, 1])
+    with copy_col_a:
+        render_clipboard_button("📋 Copy Google Sheets / Excel TSV", sheets_tsv, google_key)
+    with copy_col_b:
+        render_clipboard_button("📋 Copy Salesforce Update TSV", sf_tsv, sf_key)
+
+    with st.expander("Show raw copy text fallback", expanded=False):
+        fallback_tab_a, fallback_tab_b = st.tabs(["Google Sheets TSV", "Salesforce Update TSV"])
+        with fallback_tab_a:
+            render_copy_text_area(
+                "Google Sheets / Excel TSV",
+                sheets_tsv,
+                key=f"{google_key}_fallback",
+                height=220
+            )
+        with fallback_tab_b:
+            render_copy_text_area(
+                "Salesforce Update TSV",
+                sf_tsv,
+                key=f"{sf_key}_fallback",
+                height=220
+            )
+
+    st.markdown("#### Downloads")
+    dl_col_a, dl_col_b = st.columns([1, 1])
+    with dl_col_a:
+        st.download_button(
+            label=xlsx_label,
+            data=generate_excel(df_for_export),
+            file_name=download_xlsx_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True
+        )
+    with dl_col_b:
+        st.download_button(
+            label=csv_label,
+            data=generate_csv_bytes(df_for_export),
+            file_name=download_csv_name,
+            mime="text/csv",
+            use_container_width=True
+        )
+
+
 def render_copy_text_area(label: str, text_value: str, key: str, height: int = 220):
     st.text_area(
         label,
@@ -1419,23 +1527,24 @@ auto_deep_scan_default = st.sidebar.checkbox(
     help="Runs a second-pass multi-resolver DNS check only on clean, non-role-based questionable records."
 )
 
-api_provider_default = st.sidebar.selectbox(
-    "Optional verification API",
-    ["None", "ZeroBounce", "NeverBounce"],
-    index=0,
-    help="Only runs on clean deep-scan candidates. API key required."
-)
+with st.sidebar.expander("Optional third-party verification API", expanded=False):
+    api_provider_default = st.selectbox(
+        "Verification API Provider",
+        ["None", "ZeroBounce", "NeverBounce"],
+        index=0,
+        help="Only runs on records marked Paid API Candidates."
+    )
 
-api_key_default = st.sidebar.text_input(
-    "Verification API key",
-    value="",
-    type="password",
-    help="Optional. Leave blank to skip the API pass."
-)
+    api_key_default = st.text_input(
+        "Verification API key",
+        value="",
+        type="password",
+        help="Optional. Leave blank to skip the API pass."
+    )
 
-st.sidebar.caption(
-    "Deep Scan is free and separate from ZeroBounce/NeverBounce. Paid verification only runs on records marked Paid API Candidates."
-)
+    st.caption(
+        "Deep Scan is free and separate from ZeroBounce/NeverBounce. Paid verification only runs on records marked Paid API Candidates."
+    )
 
 
 # ============================================================
@@ -1635,12 +1744,13 @@ with tab_bulk:
             df_final = apply_scan_eligibility_columns(df_final, target_col)
 
             if auto_deep_scan:
-                st.info("Running deep scan on clean questionable records only...")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+                deep_candidates_before = (df_final["DeepScan_Eligible"] == "Yes").sum()
+                with st.spinner(f"Running deep scan on {deep_candidates_before:,} clean questionable record(s)..."):
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
 
-                deep_scanner = DeepDomainScanner(max_concurrent=50)
-                df_final = loop.run_until_complete(deep_scanner.process_candidates(df_final, target_col))
+                    deep_scanner = DeepDomainScanner(max_concurrent=50)
+                    df_final = loop.run_until_complete(deep_scanner.process_candidates(df_final, target_col))
 
                 deep_candidates = (df_final["DeepScan_Eligible"] == "Yes").sum()
 
@@ -1834,50 +1944,15 @@ with tab_bulk:
 
         df_export = add_salesforce_update_payload_columns(df_final, source_label="BounceGuard CSV Upload")
 
-        export_tab_a, export_tab_b, export_tab_c = st.tabs([
-            "Google Sheets TSV",
-            "Salesforce Update TSV",
-            "Downloads"
-        ])
-
-        with export_tab_a:
-            st.caption("Copy this and paste directly into Google Sheets or Excel.")
-            render_copy_text_area(
-                "Google Sheets / Excel TSV",
-                dataframe_to_tsv(df_export),
-                key="bulk_google_sheets_tsv",
-                height=300
-            )
-
-        with export_tab_b:
-            st.caption(
-                "Use this as an update-review payload. Paste into Google Sheets first, review it, then use Salesforce Inspector if you want to update Salesforce."
-            )
-            update_cols = get_salesforce_update_columns(df_export)
-            render_copy_text_area(
-                "Salesforce Update TSV",
-                dataframe_to_tsv(df_export, update_cols),
-                key="bulk_salesforce_update_tsv",
-                height=300
-            )
-
-        with export_tab_c:
-            st.download_button(
-                label="📥 Download Full Validated List (.xlsx)",
-                data=generate_excel(df_export),
-                file_name="BounceGuard_Validated_List.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True
-            )
-
-            st.download_button(
-                label="📥 Download Full Validated List (.csv)",
-                data=generate_csv_bytes(df_export),
-                file_name="BounceGuard_Validated_List.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
+        render_copy_export_panel(
+            df_for_export=df_export,
+            google_key="bulk_google_sheets_tsv",
+            sf_key="bulk_salesforce_update_tsv",
+            download_xlsx_name="BounceGuard_Validated_List.xlsx",
+            download_csv_name="BounceGuard_Validated_List.csv",
+            xlsx_label="📥 Download Full Validated List (.xlsx)",
+            csv_label="📥 Download Full Validated List (.csv)"
+        )
 
 
 
@@ -1896,11 +1971,14 @@ with tab_paste:
         "Recommended workflow: run SOQL in Salesforce Inspector, click Copy (Excel), paste here, run BounceGuard, then copy the Google Sheets TSV or Salesforce update payload."
     )
 
+    if "paste_input_reset_counter" not in st.session_state:
+        st.session_state.paste_input_reset_counter = 0
+
     pasted_text = st.text_area(
         "Paste table data here",
         height=260,
         placeholder="Paste Salesforce Inspector Copy (Excel), Excel, or Google Sheets data here...",
-        key="paste_table_input"
+        key=f"paste_table_input_{st.session_state.paste_input_reset_counter}"
     )
 
     parse_col_a, parse_col_b = st.columns([1, 1])
@@ -1916,10 +1994,13 @@ with tab_paste:
             "paste_target_col",
             "paste_total_processed",
             "paste_locally_completed_count",
-            "paste_dns_ping_count"
+            "paste_dns_ping_count",
+            "paste_target_email_col"
         ]:
             if key in st.session_state:
                 del st.session_state[key]
+
+        st.session_state.paste_input_reset_counter = st.session_state.get("paste_input_reset_counter", 0) + 1
         st.rerun()
 
     if parse_button:
@@ -2006,12 +2087,13 @@ with tab_paste:
             df_final = apply_scan_eligibility_columns(df_final, paste_target_col)
 
             if paste_auto_deep_scan:
-                st.info("Running deep scan on clean questionable records only...")
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+                deep_candidates_before = (df_final["DeepScan_Eligible"] == "Yes").sum()
+                with st.spinner(f"Running deep scan on {deep_candidates_before:,} clean questionable record(s)..."):
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
 
-                deep_scanner = DeepDomainScanner(max_concurrent=50)
-                df_final = loop.run_until_complete(deep_scanner.process_candidates(df_final, paste_target_col))
+                    deep_scanner = DeepDomainScanner(max_concurrent=50)
+                    df_final = loop.run_until_complete(deep_scanner.process_candidates(df_final, paste_target_col))
 
                 deep_candidates = (df_final["DeepScan_Eligible"] == "Yes").sum()
 
@@ -2172,53 +2254,17 @@ with tab_paste:
 
         st.markdown("### 📤 Copy / Export")
 
-        export_tab_a, export_tab_b, export_tab_c, export_tab_d = st.tabs([
-            "Google Sheets TSV",
-            "Salesforce Update TSV",
-            "Downloads",
-            "Notes"
-        ])
+        render_copy_export_panel(
+            df_for_export=df_final,
+            google_key="paste_google_sheets_tsv",
+            sf_key="paste_salesforce_update_tsv",
+            download_xlsx_name="BounceGuard_Pasted_Table_Results.xlsx",
+            download_csv_name="BounceGuard_Pasted_Table_Results.csv",
+            xlsx_label="📥 Download Pasted Results (.xlsx)",
+            csv_label="📥 Download Pasted Results (.csv)"
+        )
 
-        with export_tab_a:
-            st.caption("Copy this and paste directly into Google Sheets or Excel.")
-            render_copy_text_area(
-                "Google Sheets / Excel TSV",
-                dataframe_to_tsv(df_final),
-                key="paste_google_sheets_tsv",
-                height=300
-            )
-
-        with export_tab_b:
-            st.caption(
-                "Use this as an update-review payload. Paste into Google Sheets first, review it, then use Salesforce Inspector if you want to update Salesforce."
-            )
-            update_cols = get_salesforce_update_columns(df_final)
-            render_copy_text_area(
-                "Salesforce Update TSV",
-                dataframe_to_tsv(df_final, update_cols),
-                key="paste_salesforce_update_tsv",
-                height=300
-            )
-
-        with export_tab_c:
-            st.download_button(
-                label="📥 Download Pasted Results (.xlsx)",
-                data=generate_excel(df_final),
-                file_name="BounceGuard_Pasted_Table_Results.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                use_container_width=True
-            )
-
-            st.download_button(
-                label="📥 Download Pasted Results (.csv)",
-                data=generate_csv_bytes(df_final),
-                file_name="BounceGuard_Pasted_Table_Results.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-
-        with export_tab_d:
+        with st.expander("Notes", expanded=False):
             st.info(
                 "BounceGuard does not write to Salesforce from this tab. Use Salesforce Inspector for imports/updates after reviewing the output."
             )
