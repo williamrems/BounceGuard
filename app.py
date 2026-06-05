@@ -2337,6 +2337,17 @@ with tab_paste:
         "Recommended workflow: run SOQL in Salesforce Inspector, click Copy (Excel), paste here, run BounceGuard, then copy the Google Sheets TSV or Salesforce update payload."
     )
 
+    with st.expander("Recommended Salesforce Inspector SOQL", expanded=True):
+        st.caption("Use active, unconverted Leads for the normal BounceGuard hygiene pass. Include blank emails if you want BounceGuard to classify them as No Email.")
+        st.code(
+            """SELECT Id, FirstName, LastName, Name, Email
+FROM Lead
+WHERE IsConverted = false
+LIMIT 5000""",
+            language="sql"
+        )
+        st.caption("If you only want to validate records that already have an email, add: AND Email != null")
+
     if "paste_input_reset_counter" not in st.session_state:
         st.session_state.paste_input_reset_counter = 0
 
