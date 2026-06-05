@@ -1522,18 +1522,16 @@ def status_matches_filter(df: pd.DataFrame, filter_choice: str) -> pd.DataFrame:
 
 st.sidebar.header("BounceGuard Settings")
 
-auto_deep_scan_default = st.sidebar.checkbox(
-    "Auto deep scan clean questionable records",
-    value=True,
-    help="Runs a second-pass multi-resolver DNS check only on clean, non-role-based questionable records."
-)
+# Deep Scan is intentionally always on for batch workflows.
+# It is free, limited to clean questionable records, and prevents users from skipping an important safety check.
+auto_deep_scan_default = True
 
-with st.sidebar.expander("Optional third-party verification API", expanded=False):
+with st.sidebar.expander("Optional paid third-party verification API", expanded=False):
     api_provider_default = st.selectbox(
         "Verification API Provider",
         ["None", "ZeroBounce", "NeverBounce"],
         index=0,
-        help="Only runs on records marked Paid API Candidates."
+        help="Optional paid third-party verification. Only runs on records marked Paid API Candidates."
     )
 
     api_key_default = st.text_input(
@@ -1544,7 +1542,7 @@ with st.sidebar.expander("Optional third-party verification API", expanded=False
     )
 
     st.caption(
-        "Deep Scan is free and separate from ZeroBounce/NeverBounce. Paid verification only runs on records marked Paid API Candidates."
+        "Deep Scan is free and always runs after batch validation. ZeroBounce/NeverBounce may consume paid credits and only runs on records marked Paid API Candidates."
     )
 
 
@@ -1689,11 +1687,8 @@ with tab_bulk:
         target_col = st.selectbox("🎯 Target Email Column:", options=columns, index=guess_idx)
         st.session_state.target_col = target_col
 
-        auto_deep_scan = st.checkbox(
-            "Run automatic deep scan",
-            value=auto_deep_scan_default,
-            help="Only checks clean questionable records after the first pass."
-        )
+        auto_deep_scan = True
+        st.caption("Deep Scan runs automatically after validation. It only checks clean questionable records and does not use any paid third-party service.")
 
         if st.button("🚀 Run Batch Validation", type="primary", use_container_width=True):
             with st.spinner("Running local checks..."):
@@ -1790,27 +1785,22 @@ with tab_bulk:
         st.markdown("---")
         st.markdown("### Current Results")
 
-        action_col_a, action_col_b, action_col_c = st.columns([1, 1, 1])
+        action_col_a, action_col_b = st.columns([1, 1])
 
         with action_col_a:
-            run_deep_now = st.button(
-                "🔬 Run Deep Scan on Current Results",
+            run_api_now = st.button(
+                "💳 Run Paid Verification API on Current Results",
                 use_container_width=True,
-                help="Use this if you ran the first pass with deep scan turned off."
+                help="Optional paid third-party check. Requires ZeroBounce or NeverBounce API key in the sidebar. Only Paid API Candidates are sent."
             )
 
         with action_col_b:
-            run_api_now = st.button(
-                "🧪 Run Verification API on Current Results",
-                use_container_width=True,
-                help="Requires provider and API key in the sidebar. Only clean deep-scan candidates are sent."
-            )
-
-        with action_col_c:
             clear_results = st.button(
                 "🗑️ Clear Results",
                 use_container_width=True
             )
+
+        run_deep_now = False
 
         if clear_results:
             st.session_state.df_final = None
@@ -2031,12 +2021,8 @@ with tab_paste:
         )
         st.session_state.paste_target_col = paste_target_col
 
-        paste_auto_deep_scan = st.checkbox(
-            "Run automatic deep scan",
-            value=auto_deep_scan_default,
-            key="paste_auto_deep_scan",
-            help="Only checks clean questionable records after the first pass."
-        )
+        paste_auto_deep_scan = True
+        st.caption("Deep Scan runs automatically after validation. It only checks clean questionable records and does not use any paid third-party service.")
 
         if st.button("🚀 Run BounceGuard on Pasted Table", type="primary", use_container_width=True):
             df = df_paste.copy()
@@ -2131,18 +2117,17 @@ with tab_paste:
         action_col_a, action_col_b = st.columns([1, 1])
 
         with action_col_a:
-            run_paste_deep_now = st.button(
-                "🔬 Run Deep Scan on Pasted Results",
+            run_paste_api_now = st.button(
+                "💳 Run Paid Verification API on Pasted Results",
                 use_container_width=True,
-                key="paste_run_deep_now"
+                key="paste_run_api_now",
+                help="Optional paid third-party check. Requires ZeroBounce or NeverBounce API key in the sidebar. Only Paid API Candidates are sent."
             )
 
         with action_col_b:
-            run_paste_api_now = st.button(
-                "🧪 Run Verification API on Pasted Results",
-                use_container_width=True,
-                key="paste_run_api_now"
-            )
+            st.info("Deep Scan already runs automatically after validation.")
+
+        run_paste_deep_now = False
 
         if run_paste_deep_now:
             if not paste_target_col:
@@ -2303,11 +2288,11 @@ with tab_about:
 
     **Deep Scan**
 
-    Deep Scan is BounceGuard's free second-pass check. It asks multiple DNS providers whether a questionable domain can receive email. It skips obvious junk, Salesforce sandbox emails, role-based addresses, and typo domains.
+    Deep Scan is BounceGuard's free second-pass check and runs automatically after batch validation. It asks multiple DNS providers whether a questionable domain can receive email. It skips obvious junk, Salesforce sandbox emails, role-based addresses, and typo domains.
 
-    **Third-Party Verification**
+    **Paid Third-Party Verification**
 
-    ZeroBounce or NeverBounce is separate from Deep Scan. These paid services should only be used on the small group of clean records that remain unresolved after BounceGuard's free checks.
+    ZeroBounce or NeverBounce is separate from Deep Scan. These services may consume paid credits and should only be used on the small group of clean records that remain unresolved after BounceGuard's free checks.
 
     **Important**
 
@@ -2315,5 +2300,5 @@ with tab_about:
     """)
 
     st.info(
-        "Recommended workflow: run BounceGuard first, run Deep Scan second, then send only the remaining paid API candidates to a third-party verifier."
+        "Recommended workflow: run BounceGuard, let the automatic Deep Scan finish, then optionally send only the remaining Paid API Candidates to a third-party verifier."
     )
