@@ -1152,7 +1152,18 @@ def generate_excel(df):
     if not df.empty:
         worksheet.autofilter(0, 0, len(df), len(df.columns) - 1)
 
-        status_idx = df.columns.get_loc("BounceGuard_Status")
+        # Support both the internal working dataframe and the cleaned export dataframe.
+        # Clean exports use BounceGuard_Status_Display instead of the raw BounceGuard_Status column.
+        status_col_name = None
+        if "BounceGuard_Status" in df.columns:
+            status_col_name = "BounceGuard_Status"
+        elif "BounceGuard_Status_Display" in df.columns:
+            status_col_name = "BounceGuard_Status_Display"
+        elif "BounceGuard_Status__c" in df.columns:
+            status_col_name = "BounceGuard_Status__c"
+
+        status_idx = df.columns.get_loc(status_col_name) if status_col_name else None
+
         risk_level_idx = df.columns.get_loc("BounceGuard_Risk_Level") if "BounceGuard_Risk_Level" in df.columns else None
 
         red_fmt = workbook.add_format({"bg_color": "#FFC7CE", "font_color": "#9C0006"})
@@ -1161,33 +1172,37 @@ def generate_excel(df):
         gray_fmt = workbook.add_format({"font_color": "#7F7F7F"})
         orange_fmt = workbook.add_format({"bg_color": "#FCE4D6", "font_color": "#C65911"})
 
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {
-            "type": "text", "criteria": "containing", "value": "Domain Verified", "format": green_fmt
-        })
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {
-            "type": "text", "criteria": "containing", "value": "Invalid", "format": red_fmt
-        })
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {
-            "type": "text", "criteria": "containing", "value": "Cannot Receive", "format": red_fmt
-        })
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {
-            "type": "text", "criteria": "containing", "value": "Temporary", "format": red_fmt
-        })
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {
-            "type": "text", "criteria": "containing", "value": "Sandbox", "format": red_fmt
-        })
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {
-            "type": "text", "criteria": "containing", "value": "Role-Based", "format": yellow_fmt
-        })
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {
-            "type": "text", "criteria": "containing", "value": "Likely Domain Typo", "format": orange_fmt
-        })
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {
-            "type": "text", "criteria": "containing", "value": "Unknown", "format": orange_fmt
-        })
-        worksheet.conditional_format(1, status_idx, len(df), status_idx, {
-            "type": "text", "criteria": "containing", "value": "Empty", "format": gray_fmt
-        })
+        if status_idx is not None:
+            worksheet.conditional_format(1, status_idx, len(df), status_idx, {
+                "type": "text", "criteria": "containing", "value": "Domain Verified", "format": green_fmt
+            })
+            worksheet.conditional_format(1, status_idx, len(df), status_idx, {
+                "type": "text", "criteria": "containing", "value": "Invalid", "format": red_fmt
+            })
+            worksheet.conditional_format(1, status_idx, len(df), status_idx, {
+                "type": "text", "criteria": "containing", "value": "Cannot Receive", "format": red_fmt
+            })
+            worksheet.conditional_format(1, status_idx, len(df), status_idx, {
+                "type": "text", "criteria": "containing", "value": "Temporary", "format": red_fmt
+            })
+            worksheet.conditional_format(1, status_idx, len(df), status_idx, {
+                "type": "text", "criteria": "containing", "value": "Sandbox", "format": red_fmt
+            })
+            worksheet.conditional_format(1, status_idx, len(df), status_idx, {
+                "type": "text", "criteria": "containing", "value": "Role-Based", "format": yellow_fmt
+            })
+            worksheet.conditional_format(1, status_idx, len(df), status_idx, {
+                "type": "text", "criteria": "containing", "value": "Likely Domain Typo", "format": orange_fmt
+            })
+            worksheet.conditional_format(1, status_idx, len(df), status_idx, {
+                "type": "text", "criteria": "containing", "value": "Unknown", "format": orange_fmt
+            })
+            worksheet.conditional_format(1, status_idx, len(df), status_idx, {
+                "type": "text", "criteria": "containing", "value": "Empty", "format": gray_fmt
+            })
+            worksheet.conditional_format(1, status_idx, len(df), status_idx, {
+                "type": "text", "criteria": "containing", "value": "No Email", "format": gray_fmt
+            })
 
         if risk_level_idx is not None:
             worksheet.conditional_format(1, risk_level_idx, len(df), risk_level_idx, {
