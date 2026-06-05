@@ -23,6 +23,8 @@ import re
 import io
 import math
 import os
+import hashlib
+import pickle
 import csv
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, List
@@ -1225,35 +1227,36 @@ def count_records_without_email(df: pd.DataFrame, email_col: str) -> int:
 
 def build_filter_labels(df: pd.DataFrame) -> dict:
     """
-    Builds user-friendly filter labels with counts so the filter options match the dashboard.
+    Builds user-friendly filter labels with counts.
+    Order intentionally matches the dashboard KPI order.
     """
     if df is None or df.empty or "BounceGuard_Status" not in df.columns:
         return {
             "All Records": "All Records (0)",
+            "No Email": "No Email (0)",
             "✅ Domain Verified": "✅ Domain Verified (0)",
             "⚠️ Caution / Review": "⚠️ Caution / Review (0)",
             "🚨 Suppress": "🚨 Suppress (0)",
             "🔬 Deep Scan Candidates": "🔬 Deep Scan Candidates (0)",
             "💳 Paid API Candidates": "💳 Paid API Candidates (0)",
-            "⚪ Empty": "⚪ Empty (0)",
         }
 
     all_records = len(df)
+    no_email = df["BounceGuard_Status"].eq(STATUS_EMPTY).sum()
     domain_verified = df["BounceGuard_Status"].eq(STATUS_DOMAIN_VERIFIED).sum()
     caution = df["BounceGuard_Status"].isin([STATUS_ROLE_BASED, STATUS_TYPO, STATUS_UNKNOWN]).sum()
     suppress = df["BounceGuard_Status"].isin([STATUS_HIGH_RISK, STATUS_DISPOSABLE, STATUS_NO_MX, STATUS_SANDBOX_INVALID]).sum()
-    empty = df["BounceGuard_Status"].eq(STATUS_EMPTY).sum()
     deep_candidates = (df["DeepScan_Eligible"] == "Yes").sum() if "DeepScan_Eligible" in df.columns else 0
     paid_candidates = (df["PaidVerification_Eligible"] == PAID_VERIFICATION_YES).sum() if "PaidVerification_Eligible" in df.columns else 0
 
     return {
         "All Records": f"All Records ({all_records:,})",
+        "No Email": f"No Email ({no_email:,})",
         "✅ Domain Verified": f"✅ Domain Verified ({domain_verified:,})",
         "⚠️ Caution / Review": f"⚠️ Caution / Review ({caution:,})",
         "🚨 Suppress": f"🚨 Suppress ({suppress:,})",
         "🔬 Deep Scan Candidates": f"🔬 Deep Scan Candidates ({deep_candidates:,})",
         "💳 Paid API Candidates": f"💳 Paid API Candidates ({paid_candidates:,})",
-        "⚪ Empty": f"⚪ Empty ({empty:,})",
     }
 
 
@@ -1266,6 +1269,7 @@ def normalize_filter_choice(label: str) -> str:
 
     for base in [
         "All Records",
+        "No Email",
         "✅ Domain Verified",
         "⚠️ Caution / Review",
         "🚨 Suppress",
@@ -1543,6 +1547,74 @@ def render_copy_export_panel(
         )
 
 
+
+def safe_dataframe_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Prevents Streamlit/Arrow mixed-type serialization warnings by normalizing columns
+    that can contain a mix of blanks, booleans, ints, and strings.
+    """
+    if df is None or df.empty:
+        return df
+
+    df_display = df.copy()
+
+    mixed_type_cols = [
+        "DeepScan_MX_Resolvers_Found",
+        "DeepScan_Resolver_Errors",
+        "BounceGuard_Paid_Verification_Eligible__c",
+    ]
+
+    for col in mixed_type_cols:
+        if col in df_display.columns:
+            df_display[col] = df_display[col].astype(str)
+
+    return df_display
+
+
+def get_paste_cache_path(raw_text: str) -> Path:
+    """
+    Creates a deterministic cache path from pasted input.
+    This helps restore processed results if Streamlit reconnects and loses session state.
+    """
+    cache_dir = Path("/tmp/bounceguard_paste_cache")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    digest = hashlib.sha256((raw_text or "").encode("utf-8", errors="ignore")).hexdigest()[:24]
+    return cache_dir / f"paste_results_{digest}.pkl"
+
+
+def save_paste_results_cache(raw_text: str, df_final: pd.DataFrame, email_col: str, metrics: dict):
+    if not raw_text or df_final is None or df_final.empty:
+        return
+
+    payload = {
+        "df_final": df_final,
+        "email_col": email_col,
+        "metrics": metrics or {},
+    }
+
+    try:
+        with open(get_paste_cache_path(raw_text), "wb") as f:
+            pickle.dump(payload, f)
+    except Exception:
+        pass
+
+
+def load_paste_results_cache(raw_text: str):
+    if not raw_text:
+        return None
+
+    path = get_paste_cache_path(raw_text)
+    if not path.exists():
+        return None
+
+    try:
+        with open(path, "rb") as f:
+            return pickle.load(f)
+    except Exception:
+        return None
+
+
 def render_copy_text_area(label: str, text_value: str, key: str, height: int = 220):
     st.text_area(
         label,
@@ -1593,6 +1665,8 @@ def render_single_result(result: ValidationResult):
 def status_matches_filter(df: pd.DataFrame, filter_choice: str) -> pd.DataFrame:
     if filter_choice == "All Records":
         return df
+    if filter_choice == "No Email":
+        return df[df["BounceGuard_Status"].eq(STATUS_EMPTY)]
     if filter_choice == "✅ Domain Verified":
         return df[df["BounceGuard_Status"].eq(STATUS_DOMAIN_VERIFIED)]
     if filter_choice == "⚠️ Caution / Review":
@@ -2039,7 +2113,7 @@ with tab_bulk:
         ordered_cols = [col for col in priority_cols if col in display_cols]
         ordered_cols += [col for col in display_cols if col not in ordered_cols]
 
-        st.dataframe(df_display[ordered_cols].head(250), use_container_width=True)
+        st.dataframe(safe_dataframe_for_display(df_display[ordered_cols].head(250)), use_container_width=True)
 
         st.markdown("### 📤 Copy / Export")
 
@@ -2082,6 +2156,20 @@ with tab_paste:
         key=f"paste_table_input_{st.session_state.paste_input_reset_counter}"
     )
 
+    # If Streamlit reconnects and loses session state, try to restore the last processed
+    # results from the pasted input text. This avoids the random "zap, results are gone" issue
+    # as long as the server did not fully restart and the pasted text is still present.
+    if pasted_text.strip() and "paste_df_final" not in st.session_state:
+        restored = load_paste_results_cache(pasted_text)
+        if restored:
+            st.session_state.paste_df_final = restored.get("df_final")
+            st.session_state.paste_target_col = restored.get("email_col")
+            metrics = restored.get("metrics", {})
+            st.session_state.paste_total_processed = metrics.get("total_processed", 0)
+            st.session_state.paste_locally_completed_count = metrics.get("locally_completed_count", 0)
+            st.session_state.paste_dns_ping_count = metrics.get("dns_ping_count", 0)
+            st.caption("Restored processed pasted-table results from the current pasted input.")
+
     parse_col_a, parse_col_b = st.columns([1, 1])
     with parse_col_a:
         parse_button = st.button("📋 Parse Pasted Table", type="primary", use_container_width=True)
@@ -2121,7 +2209,7 @@ with tab_paste:
         paste_columns = list(df_paste.columns)
 
         st.markdown("### Parsed Preview")
-        st.dataframe(df_paste.head(50), use_container_width=True)
+        st.dataframe(safe_dataframe_for_display(df_paste.head(50)), use_container_width=True)
 
         paste_target_col = st.selectbox(
             "🎯 Target Email Column",
@@ -2215,6 +2303,18 @@ with tab_paste:
             st.session_state.paste_total_processed = total_processed
             st.session_state.paste_locally_completed_count = locally_completed_count
             st.session_state.paste_dns_ping_count = dns_ping_count
+
+            save_paste_results_cache(
+                pasted_text,
+                df_final,
+                paste_target_col,
+                {
+                    "total_processed": total_processed,
+                    "locally_completed_count": locally_completed_count,
+                    "dns_ping_count": dns_ping_count,
+                }
+            )
+
             st.success("Pasted table validation complete.")
 
     if "paste_df_final" in st.session_state and st.session_state.paste_df_final is not None:
@@ -2286,6 +2386,18 @@ with tab_paste:
                         df_work = add_salesforce_update_payload_columns(df_work, source_label="BounceGuard Paste Table")
                         st.session_state.paste_df_final = df_work
                         df_final = df_work
+
+                        save_paste_results_cache(
+                            pasted_text,
+                            df_work,
+                            paste_target_col,
+                            {
+                                "total_processed": st.session_state.get("paste_total_processed", 0),
+                                "locally_completed_count": st.session_state.get("paste_locally_completed_count", 0),
+                                "dns_ping_count": st.session_state.get("paste_dns_ping_count", 0),
+                            }
+                        )
+
                         st.success(f"{api_provider_default} verification complete.")
 
         domain_verified = df_final["BounceGuard_Status"].eq(STATUS_DOMAIN_VERIFIED).sum()
@@ -2353,7 +2465,7 @@ with tab_paste:
         ordered_cols = [col for col in priority_cols if col and col in display_cols]
         ordered_cols += [col for col in display_cols if col not in ordered_cols]
 
-        st.dataframe(df_display[ordered_cols].head(250), use_container_width=True)
+        st.dataframe(safe_dataframe_for_display(df_display[ordered_cols].head(250)), use_container_width=True)
 
         st.markdown("### 📤 Copy / Export")
 
