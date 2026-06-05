@@ -1494,6 +1494,8 @@ def add_clean_bounceguard_output_columns(df: pd.DataFrame, source_label: str = "
     df_result["BounceGuard_Last_Checked__c"] = df_result["BounceGuard_Last_Checked"]
     df_result["BounceGuard_Source__c"] = df_result["BounceGuard_Source"]
     df_result["BounceGuard_Verify_Recommended__c"] = df_result["BounceGuard_Verify_Recommended"]
+    # A successful BounceGuard scan clears the manual recheck queue.
+    df_result["BounceGuard_Needs_Recheck__c"] = False
     df_result["BounceGuard_Deep_Scan_Status__c"] = df_result["BounceGuard_Deep_Scan_Status"]
 
     return df_result
@@ -1571,6 +1573,7 @@ def get_salesforce_update_payload_columns(df: pd.DataFrame) -> list:
         "BounceGuard_Detail__c",
         "BounceGuard_Last_Checked__c",
         "BounceGuard_Verify_Recommended__c",
+        "BounceGuard_Needs_Recheck__c",
     ]
 
     cols += [col for col in payload_cols if col in df.columns]
